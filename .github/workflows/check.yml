@@ -1,0 +1,22 @@
+name: Check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: docker build --platform linux/amd64 -t hermes-cloudflare-sandbox:test .
+      - run: |
+          docker run --rm --platform linux/amd64 --network none \
+            -v "$PWD/test/hermes-smoke.py:/test/hermes-smoke.py:ro" \
+            hermes-cloudflare-sandbox:test python3 /test/hermes-smoke.py

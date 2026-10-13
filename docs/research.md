@@ -1,0 +1,57 @@
+# Research and design record
+
+Research date: 2026-10-13. Sources were read from live documentation and the Hermes source tree, including its tagged release. This record separates implementation decisions from platform guarantees.
+
+## Findings that determine the design
+
+| Finding | Evidence | Consequence |
+| --- | --- | --- |
+| Current Sandbox docs use a Durable Object's native Container API. | [Sandbox quickstart](https://developers.cloudflare.com/sandbox/get-started/), [Container API](https://developers.cloudflare.com/containers/api/durable-object-container/), [SDK 1.0 changes](https://developers.cloudflare.com/sandbox/sdk/migrate/changes-in-1-0/) | Use `container.start()` and argv-based `container.exec()`. Installed local skill notes describing `getSandbox()` were stale. |
+| `@cloudflare/sandbox` 1.0.1 provides file/storage helpers and does not manage lifecycle. | [Package reference](https://developers.cloudflare.com/sandbox/reference/); npm `latest` was `1.0.1`. | An exec-only example needs neither that package nor `sandbox-shim`. |
+| `exec()` inherits only PATH; process output has no built-in memory bound; killing its parent does not kill descendants. | [Container process API](https://developers.cloudflare.com/containers/api/durable-object-container/#exec) | Pass the runtime environment explicitly, drain both output streams with limits, and destroy the container on completion/deadline/disconnect. |
+| The latest tagged Hermes release is v2026.9.24 / v0.21.5; it accepts Python 3.11–3.13. | [Release](https://github.com/nousresearch/hermes-agent/releases/tag/v2026.9.24), [pinned pyproject.toml](https://github.com/nousresearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/pyproject.toml) | Pin that commit and Python 3.13. Main was at `e06df9c2eae6901f4c88f464e0ae6e753c0428b8` and had materially different Python requirements. |
+| Hermes already has a finite CLI with configurable toolsets and useful exit codes. | [Pinned parser](https://github.com/nousresearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/hermes_cli/_parser.py), [single-query execution](https://github.com/nousresearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/hermes_cli/cli_single_query.py), [CLI documentation](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) | Use `hermes chat --quiet`, not a custom Python agent wrapper, HTTP server, or interactive setup wizard. |
+| `terminal` and `file` are explicit Hermes toolsets. Its local backend executes on the host running Hermes. | [Pinned toolsets](https://github.com/nousresearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/toolsets.py), [local environment](https://github.com/nousresearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/tools/environments/local.py) | Run the entire agent in Cloudflare. No new Hermes terminal backend or Docker-in-Docker is required. |
+| Cloudflare can intercept HTTPS and inject credentials outside the container. Python/Git need the interception CA. | [Authenticated API guide](https://developers.cloudflare.com/sandbox/network/call-an-authenticated-api/), [coding-agent runner](https://developers.cloudflare.com/sandbox/get-started/build-a-coding-agent-runner/), [Hermes CA selection](https://github.com/nousresearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/ssl_verify.py) | Inject the OpenRouter key only on the exact HTTPS chat-completions endpoint. Pass `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, and `GIT_SSL_CAINFO` to processes. |
+| OpenRouter accepts standard chat completions and tool calls; the chosen model advertises tool support. | [OpenRouter quickstart](https://openrouter.ai/docs/quickstart), [model catalog](https://openrouter.ai/api/v1/models), checked `anthropic/claude-sonnet-4.6` | Use the built-in Hermes OpenRouter provider. No OpenAI account/key is required despite the compatible wire protocol. |
+| The existing coding-agents landing page is navigation, with separate pages per agent. | [Live landing page](https://developers.cloudflare.com/sandbox/coding-agents/), [source](https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/sandbox/coding-agents/index.mdx), [Pi page](https://developers.cloudflare.com/sandbox/coding-agents/pi/) | Add `/sandbox/coding-agents/hermes/` and a landing-page card. Keep the existing overview. |
+
+## Alternatives considered
+
+**Entire Hermes process inside a sandbox — selected.** This uses unmodified upstream behavior and makes `local` shell/file tools useful immediately. The main runtime code is a small Worker plus a Dockerfile. Native Containers and current Sandboxes are layers of this same design, not separate deployments.
+
+**Hermes outside Cloudflare, remote shell inside Cloudflare.** This would demonstrate a new Hermes backend integration rather than running Hermes on Cloudflare. It needs additional transport, session, file, and credential plumbing, and leaves the agent loop elsewhere.
+
+**Long-running Hermes gateway.** Suitable for Telegram/Discord and ongoing personal assistance, but adds gateway lifecycle, channel credentials, durable home storage, concurrency, and recovery. It obscures the coding-agent example.
+
+**A background task API.** The official runner supports repository setup, starting work, polling status, and fetching a diff. That is the right next step for long runs. This repository deliberately uses a connected request with a hard deadline so readers can trace the whole example in one pass. Client retry starts a new task and may incur new charges.
+
+**AI Gateway or Workers AI.** Both can be added later. OpenRouter is already a first-class Hermes provider and needs only one model key. AI Gateway adds gateway/account configuration and another credential layer. The legacy AI Gateway `/compat/chat/completions` endpoint is now [deprecated for new single-model integrations](https://developers.cloudflare.com/ai-gateway/usage/chat-completion/); a future example should use the current [AI Gateway REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/) or a provider-specific route. We have not validated a Workers AI model/tool loop here.
+
+**Persistent memory.** Keeping `/workspace/repo` alone does not preserve Hermes's memory. A persistent variant must also save `HERMES_HOME` (sessions, memory, skills/configuration), restore it before running the agent, and assign separate state to each user. Live SQLite state should not simply be put on an object-store FUSE mount. Consult [snapshot persistence](https://developers.cloudflare.com/sandbox/files/save-and-restore-a-workspace/) and upstream storage behavior before adding this.
+
+## Boundaries worth explaining
+
+- The model key stays in the Worker, but sandbox code is still allowed to make model calls with it. Credential isolation does not enforce a model-spend quota.
+- Repository content is input to the model. The GitHub/model allowlist constrains destinations, not the information sent to those destinations.
+- `--yolo` is intentional for this unattended container. Shell and file tools can control the entire disposable container. File permissions are not presented as a second isolation boundary.
+- `--max-turns 12` bounds agent iterations, not tokens, dollars, or command duration. The Worker separately enforces the five-minute deadline.
+- The captured base commit makes the returned diff include changes Hermes staged or committed, plus new non-ignored files. Ignored/generated files are not automatically exported.
+- No Worker, Cloudflare resource, GitHub repository, or documentation page is published by the validation commands.
+
+## Validation
+
+Checked on 2026-10-13:
+
+| Check | Result |
+| --- | --- |
+| `npm run check` | Passed: Wrangler 4.150.0 generated bindings/runtime types; TypeScript passed. |
+| `npm test` | Passed: 18 tests for input/authentication, literal prompts, byte limits, exact credential routing, failure status, deadlines, and cleanup. Container calls are mocked in these tests. |
+| Docker build, `linux/amd64` | Passed. The image installed the pinned release and its 63 locked Python packages. Local image size approximately 302 MB. |
+| Actual Hermes CLI on macOS and in the Linux image | Passed against a local deterministic model stub: wrote `hello.py`, executed a Python assertion via the terminal tool, returned a final answer, preserved shell metacharacters in the prompt, and exited `1` on model authentication failure. The container smoke test has no external network access. |
+| `wrangler deploy --dry-run` | Passed, including Docker image build and Worker bundle (6.73 KiB before compression). Nothing deployed. |
+| Actual `wrangler dev` / Container / GitHub / OpenRouter path | With a dummy model key: unauthorized caller returned `401`; invalid repository returned `400`; valid input cloned GitHub, launched Hermes, reached OpenRouter's authentication error, and returned `422`, `stage: hermes`, `exitCode: 1`. The task container was removed afterward. |
+| Local disconnect experiment | A client timeout after one second did **not** promptly cancel the local task. It completed with the expected authentication failure about 12 seconds after starting, then removed its task container. The abort-handler unit test passes, but immediate disconnect propagation through Wrangler's local proxy is not established. Documentation qualifies this behavior. |
+| Documentation | MDX parsed successfully; all six embedded source/configuration snippets matched the runnable files; the overview patch applied to the fetched upstream source. Full Cloudflare docs-site build not run here. |
+
+A deterministic model stub verifies the real Hermes tool loop; it is not evidence of a successful paid model call or a deployed Cloudflare run. No real OpenRouter key was supplied, and no Cloudflare deployment was made. A live end-to-end run remains a publication prerequisite. The request-cancellation implementation follows the current [Container API documentation](https://developers.cloudflare.com/containers/api/durable-object-container/#process-lifetime); the local experiment above is deliberately recorded separately from that documented behavior.

@@ -1,0 +1,401 @@
+---
+title: Run Hermes in a sandbox
+description: Run Hermes Agent on a public GitHub repository in a Linux sandbox and return its changes as a Git diff.
+pcx_content_type: how-to
+sidebar:
+  order: 4.5
+  label: Hermes
+products:
+  - sandbox
+  - containers
+  - durable-objects
+  - workers
+---
+
+import { WranglerConfig } from "~/components";
+
+Run [Hermes Agent](https://github.com/nousresearch/hermes-agent) in a Linux sandbox on [Cloudflare Containers](/containers/). Send a public GitHub repository and a prompt to a Worker. Hermes reads files, edits code, and runs commands inside the sandbox. The Worker returns the agent's answer and a Git diff, then destroys the container.
+
+Hermes calls a model through [OpenRouter](https://openrouter.ai/docs/quickstart). Your Worker adds the API key to model requests, so the real key never enters the sandbox. The sandbox can reach only GitHub and the model endpoint.
+
+This example runs one short task per connected HTTP request. For background tasks with polling and reconnects, start with [Build a coding agent runner](/sandbox/get-started/build-a-coding-agent-runner/).
+
+## Prerequisites
+
+- A Cloudflare account that meets the [Containers prerequisites](/containers/get-started/).
+- Node.js 22 or later and [Docker](https://docs.docker.com/get-started/get-docker/) running locally.
+- An [OpenRouter API key](https://openrouter.ai/settings/keys) with credit for a model that supports tool calling.
+
+## 1. Create the project
+
+```sh
+mkdir hermes-sandbox
+cd hermes-sandbox
+npm init -y
+npm install --save-dev wrangler@4.150.0 @types/node
+mkdir src
+```
+
+Create `wrangler.jsonc`:
+
+<WranglerConfig>
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hermes-sandbox",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-13",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": { "MODEL": "anthropic/claude-sonnet-4.6" },
+  "secrets": { "required": ["API_TOKEN", "OPENROUTER_API_KEY"] },
+  "containers": [{
+    "class_name": "HermesSandbox",
+    "scheduling_policy": "durable_object",
+    "images": { "hermes": { "dockerfile": "./Dockerfile" } }
+  }],
+  "durable_objects": {
+    "bindings": [{ "name": "SANDBOX", "class_name": "HermesSandbox" }]
+  },
+  "exports": {
+    "HermesSandbox": { "type": "durable-object", "storage": "sqlite" }
+  }
+}
+```
+
+</WranglerConfig>
+
+Each request gets a new `HermesSandbox` Durable Object and its own container. Wrangler builds the image named `hermes`; the Durable Object selects it with `container.images.hermes`. `enable_request_signal` lets the Worker stop work when a client disconnects.
+
+## 2. Install Hermes in the image
+
+Create `Dockerfile`:
+
+```dockerfile title="Dockerfile"
+FROM python:3.13-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+# Hermes v0.21.5 (release v2026.9.24). Pin source and use its dependency lock.
+ARG HERMES_COMMIT=f97608f178d1ffeca59860195ab7da295f7c8e5f
+RUN git init /opt/hermes \
+    && cd /opt/hermes \
+    && git remote add origin https://github.com/nousresearch/hermes-agent.git \
+    && git fetch --depth 1 origin "$HERMES_COMMIT" \
+    && git checkout --detach FETCH_HEAD
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /usr/local/bin/uv
+RUN cd /opt/hermes && uv sync --frozen --no-dev --python /usr/local/bin/python3
+
+ENV PATH="/opt/hermes/.venv/bin:$PATH"
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+```
+
+This pins Hermes v0.21.5 (`v2026.9.24`) and installs its locked Python dependencies. That release requires Python below 3.14. Keeping a fixed commit avoids changes to CLI flags and exit behavior when the upstream development branch changes.
+
+Create `.dockerignore` so local secrets and files cannot enter the image build context:
+
+```text title=".dockerignore"
+**
+!Dockerfile
+```
+
+Install any additional dependencies the task needs in the image. The runtime network policy below blocks package registries.
+
+## 3. Add the Worker
+
+Create the following four files. This example uses the native [Container process API](/containers/api/durable-object-container/#exec); it does not need the optional file and storage helpers from `@cloudflare/sandbox`.
+
+### Authenticate and validate requests
+
+`src/index.ts` rejects invalid requests before it allocates a sandbox. `API_TOKEN` is your caller's bearer token, separate from the model key.
+
+```ts title="src/index.ts"
+import { authorized, parseTask, readText } from "./helpers";
+
+export { HermesSandbox } from "./sandbox";
+export { Outbound } from "./outbound";
+
+export default {
+  async fetch(request, env): Promise<Response> {
+    if (new URL(request.url).pathname !== "/run") return new Response("Not found", { status: 404 });
+    if (request.method !== "POST") return new Response("Use POST", { status: 405, headers: { Allow: "POST" } });
+    if (!env.API_TOKEN || !env.OPENROUTER_API_KEY) {
+      return new Response("Configure API_TOKEN and OPENROUTER_API_KEY", { status: 503 });
+    }
+    if (!authorized(request.headers.get("Authorization"), env.API_TOKEN)) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    let body: string;
+    try {
+      body = JSON.stringify(parseTask(await readText(request.body, 16 * 1024)));
+    } catch {
+      return Response.json({ error: "Send JSON with a public GitHub repository URL and a prompt (1–8000 characters; body ≤16 KiB)." }, { status: 400 });
+    }
+
+    // Each request gets its own container, filesystem, and Hermes home directory.
+    const sandbox = env.SANDBOX.get(env.SANDBOX.newUniqueId());
+    return sandbox.fetch(new Request(request, { body }));
+  },
+} satisfies ExportedHandler<Env>;
+```
+
+### Bound input and output
+
+`src/helpers.ts` compares tokens and limits buffered data. Reading both process output streams concurrently prevents a full stderr pipe from blocking the command.
+
+```ts title="src/helpers.ts"
+import { timingSafeEqual } from "node:crypto";
+
+export function authorized(header: string | null, token: string): boolean {
+  if (!token || !header) return false;
+  const actual = new TextEncoder().encode(header);
+  const expected = new TextEncoder().encode(`Bearer ${token}`);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+// Drain stdout and stderr separately with a limit; output() would buffer without a limit.
+export async function readText(stream: ReadableStream<Uint8Array> | null, limit: number): Promise<string> {
+  if (!stream) return "";
+  let bytes = 0;
+  let text = "";
+  const decoder = new TextDecoder();
+  for await (const chunk of stream) {
+    bytes += chunk.byteLength;
+    if (bytes > limit) throw new Error(`Output exceeds ${limit} bytes`);
+    text += decoder.decode(chunk, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+export function parseTask(body: string): { repository: string; prompt: string } {
+  const task = JSON.parse(body);
+  if (typeof task?.prompt !== "string" || !task.prompt.trim() || task.prompt.length > 8000) {
+    throw new Error("prompt must contain 1–8000 characters");
+  }
+  // Accept public GitHub clone URLs, with no credentials, query, ref, or shell syntax.
+  if (typeof task.repository !== "string" ||
+      !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(task.repository)) {
+    throw new Error("repository must be https://github.com/OWNER/REPO");
+  }
+  return { repository: task.repository, prompt: task.prompt };
+}
+```
+
+### Keep the model key in the Worker
+
+`src/outbound.ts` allows only the destinations the example needs. It replaces the placeholder key only on an HTTPS POST to the exact OpenRouter chat-completions endpoint. Redirects are returned to the container instead of followed with a credential attached.
+
+```ts title="src/outbound.ts"
+import { WorkerEntrypoint } from "cloudflare:workers";
+
+export class Outbound extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.protocol !== "https:" || (url.port && url.port !== "443")) {
+      return new Response("HTTPS only", { status: 403 });
+    }
+
+    if (url.hostname === "openrouter.ai" && url.pathname === "/api/v1/chat/completions" && request.method === "POST") {
+      const headers = new Headers(request.headers);
+      headers.set("Authorization", `Bearer ${this.env.OPENROUTER_API_KEY}`);
+      // Do not follow redirects with a credential attached.
+      return fetch(new Request(request, { headers, redirect: "manual" }));
+    }
+    // Git smart HTTP uses GET and POST. No GitHub token is supplied.
+    if (url.hostname === "github.com" && ["GET", "POST"].includes(request.method)) {
+      const headers = new Headers(request.headers);
+      headers.delete("Authorization");
+      return fetch(new Request(request, { headers, redirect: "manual" }));
+    }
+    return new Response("Destination is not allowed", { status: 403 });
+  }
+}
+```
+
+### Run Hermes and collect its changes
+
+`src/sandbox.ts` starts the container with direct Internet access disabled, registers the outbound handler, and clones the repository. It runs Hermes with its terminal and file toolsets, compares the workspace against the original commit, and destroys the container in `finally`.
+
+```ts title="src/sandbox.ts"
+import { DurableObject } from "cloudflare:workers";
+import { readText } from "./helpers";
+
+const ca = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
+const processEnv = {
+  HOME: "/root",
+  HERMES_HOME: "/tmp/hermes-home",
+  TERMINAL_ENV: "local",
+  TERMINAL_CWD: "/workspace/repo",
+  OPENROUTER_API_KEY: "provided-by-worker",
+  PYTHONUNBUFFERED: "1",
+  GIT_TERMINAL_PROMPT: "0",
+  // exec() inherits only PATH. Python and Git must trust the interception CA.
+  SSL_CERT_FILE: ca,
+  REQUESTS_CA_BUNDLE: ca,
+  GIT_SSL_CAINFO: ca,
+};
+
+export class HermesSandbox extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const container = this.ctx.container!;
+    const task: { repository: string; prompt: string } = await request.json();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort = () => {};
+    const stopped = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Task exceeded five minutes")), 5 * 60_000);
+      onAbort = () => reject(new Error("Client disconnected"));
+      request.signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+    try {
+      if (request.signal.aborted) throw new Error("Client disconnected");
+      const result = await Promise.race([this.run(task), stopped]);
+      return Response.json(result, { status: result.exitCode === 0 ? 200 : 422 });
+    } catch (error) {
+      return Response.json({ error: error instanceof Error ? error.message : "Sandbox failed" }, { status: 502 });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      request.signal.removeEventListener("abort", onAbort);
+      // Destroy the whole container, including any children Hermes started.
+      await container.destroy();
+    }
+  }
+
+  private async run(task: { repository: string; prompt: string }) {
+    const container = this.ctx.container!;
+    container.start({ image: container.images.hermes, instance: "standard-1", enableInternet: false });
+    await container.setInactivityTimeout(60_000);
+    await container.interceptAllOutboundHttp(this.ctx.exports.Outbound);
+    await container.interceptOutboundHttps("*", this.ctx.exports.Outbound);
+
+    const clone = await this.exec(["git", "clone", "--depth", "1", "--", task.repository, "/workspace/repo"], "/workspace");
+    if (clone.exitCode !== 0) return { stage: "clone", ...clone, diff: "" };
+    const base = await this.exec(["git", "rev-parse", "HEAD"]);
+    if (base.exitCode !== 0) return { stage: "clone", ...base, diff: "" };
+
+    const agent = await this.exec([
+      "hermes", "chat", "--quiet", "--provider", "openrouter", "--model", this.env.MODEL,
+      "--toolsets", "terminal,file", "--max-turns", "12", "--yolo", `--query=${task.prompt}`,
+    ]);
+    // Compare to the original commit even if Hermes staged or committed changes.
+    const diff = await this.exec([
+      "sh", "-c", 'git add --intent-to-add --all && git diff --no-ext-diff --binary "$1" --',
+      "diff", base.stdout.trim(),
+    ]);
+    if (diff.exitCode !== 0) throw new Error(`Cannot collect diff: ${diff.stderr}`);
+    return { stage: "hermes", ...agent, diff: diff.stdout };
+  }
+
+  private async exec(argv: string[], cwd = "/workspace/repo") {
+    const process = await this.ctx.container!.exec(argv, { cwd, env: processEnv });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      readText(process.stdout, 1024 * 1024),
+      readText(process.stderr, 1024 * 1024),
+      process.exitCode,
+    ]);
+    return { exitCode, stdout, stderr };
+  }
+}
+```
+
+`TERMINAL_ENV=local` runs Hermes's commands inside the container. `--quiet` runs one query and exits. `--yolo` permits unattended commands in this disposable environment. The prompt is an argument in an array, so shell syntax in the prompt is passed literally.
+
+Processes started with `exec()` inherit only `PATH`. The example explicitly sets Hermes's home, working directory, placeholder key, and the CA variables that Python and Git need for intercepted HTTPS.
+
+## 4. Configure secrets and run locally
+
+Create `.gitignore`:
+
+```text title=".gitignore"
+node_modules/
+.wrangler/
+.dev.vars
+worker-configuration.d.ts
+```
+
+Generate a token for your endpoint:
+
+```sh
+openssl rand -hex 32
+```
+
+Create `.dev.vars`, replacing both values:
+
+```dotenv title=".dev.vars"
+API_TOKEN="your-generated-token"
+OPENROUTER_API_KEY="your-openrouter-key"
+```
+
+Start the Worker:
+
+```sh
+npx wrangler types
+npx wrangler dev
+```
+
+Wrangler builds the image before starting the local server. In another terminal, set `API_TOKEN` to the value from `.dev.vars`, then send a task:
+
+```sh
+export WORKER_URL=http://localhost:8787
+curl --fail-with-body --max-time 330 "$WORKER_URL/run" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  --json '{
+    "repository": "https://github.com/octocat/Hello-World",
+    "prompt": "Read README. Create NOTES.md with one sentence explaining this repository. Use the terminal to check that NOTES.md exists."
+  }' > result.json
+```
+
+The request stays open until the task finishes. On success, the response has HTTP status `200`, `exitCode: 0`, the final answer in `stdout`, diagnostics in `stderr`, and the patch in `diff`. With `jq` installed, read the patch:
+
+```sh
+jq -r .diff result.json
+```
+
+Look for a new `NOTES.md` file. The exact text depends on the model. The Worker includes new non-ignored files and compares against the original clone commit, even if Hermes staged or committed changes.
+
+## 5. Deploy
+
+```sh
+npx wrangler login
+npx wrangler secret put API_TOKEN
+npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler deploy
+```
+
+Wrangler may ask to create the Worker when adding the first secret. `.dev.vars` is only for local development; the `secret put` commands configure deployed credentials. Docker must be running to build the image.
+
+Set `WORKER_URL` to the deployed URL and repeat the request. A first image rollout can take a few minutes. To select another model, change `MODEL` in `wrangler.jsonc` to an OpenRouter model ID with tool support and deploy again.
+
+## Task lifetime and limits
+
+The Worker destroys the container after success, failure, a five-minute deadline, or a runtime-reported client disconnect. Disconnect detection can be delayed, so closing the client is not an immediate cancellation guarantee. The deadline and container inactivity timeout apply separately. Files and `HERMES_HOME` disappear with the container, including sessions, memory, and learned skills. Keep the returned diff. To preserve a workspace across tasks, extend the example with [snapshots](/sandbox/files/save-and-restore-a-workspace/) and include the Hermes home directory in the saved state.
+
+This is a single-caller example. Anyone with `API_TOKEN` can start containers and spend model credit. It has no per-user quotas or job recovery. A retry starts a new task.
+
+The example accepts public GitHub repositories on their default branch. It does not fetch submodules or Git LFS objects. GitHub and model requests may send repository content outside the sandbox; the destination allowlist does not prevent that. Package installation and web browsing are blocked at runtime.
+
+## Troubleshooting
+
+| Result | Meaning |
+| --- | --- |
+| `400` | Invalid JSON, repository URL, prompt, or body over 16 KiB. |
+| `401` | The caller's bearer token does not match `API_TOKEN`. |
+| `422`, `stage: clone` | Git failed. Check that the repository is public and the URL is correct. |
+| `422`, `stage: hermes` | Hermes exited nonzero. Inspect `stdout` and `stderr` for provider, credit, or iteration-limit errors. |
+| `502` | Container failure, five-minute deadline, or command output over 1 MiB per stream. |
+| `503` | A required Worker secret is missing. |
+
+A successful Hermes exit reports that its run completed. Review the patch and test generated code before using it.
+
+## Related resources
+
+- [Hermes CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands)
+- [Container process API](/containers/api/durable-object-container/#exec)
+- [Call an authenticated API from a sandbox](/sandbox/network/call-an-authenticated-api/)
+- [Build a coding agent runner](/sandbox/get-started/build-a-coding-agent-runner/)

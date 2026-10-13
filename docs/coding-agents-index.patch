@@ -1,0 +1,24 @@
+--- a/src/content/docs/sandbox/coding-agents/index.mdx
++++ b/src/content/docs/sandbox/coding-agents/index.mdx
+@@ -22,7 +22,7 @@
+ 
+ Your Worker starts the sandbox, holds the credentials, and decides which hostnames the sandbox can reach. The agent calls its model over HTTP, for example through [AI Gateway](/ai-gateway/). Your Worker adds the API token to each request, so the sandbox never receives it.
+ 
+-Each guide in this section changes only the agent-specific parts of one runner. Build the runner first:
++Most guides in this section change the agent-specific parts of one runner. Build the runner first, or use the standalone Hermes example below:
+ 
+ <LinkTitleCard
+ 	title="Build a coding agent runner"
+@@ -57,6 +57,12 @@
+ 		href="/sandbox/coding-agents/pi/"
+ 		icon="simple-icons:pi"
+ 		description="Edit a GitHub repository with Pi, which calls models through its built-in AI Gateway provider."
++	/>
++	<LinkTitleCard
++		title="Hermes"
++		href="/sandbox/coding-agents/hermes/"
++		icon="terminal"
++		description="Run Hermes Agent on a public GitHub repository and return its changes as a diff."
+ 	/>
+ </CardGrid>
+ 

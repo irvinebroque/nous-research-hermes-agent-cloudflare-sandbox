@@ -1,0 +1,3 @@
+# Generate an API_TOKEN with: openssl rand -hex 32
+API_TOKEN="replace-with-a-random-token"
+OPENROUTER_API_KEY="replace-with-your-openrouter-key"
