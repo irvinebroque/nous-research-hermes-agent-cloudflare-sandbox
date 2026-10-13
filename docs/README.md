@@ -10,7 +10,7 @@ in [cloudflare/cloudflare-docs](https://github.com/cloudflare/cloudflare-docs). 
 
 The existing `/sandbox/coding-agents/` URL is the overview. `coding-agents-index.patch` adds a Hermes card there and adjusts the introduction so it accommodates this standalone example. It does not replace the overview.
 
-The draft embeds the runnable source, so no unpublished example-repository URL is required. Once this repository has a public URL, add an example-repository link to the page's related resources. No Git remote is configured in this workspace yet.
+The draft embeds the runnable source and links to the [public example repository](https://github.com/irvinebroque/nous-research-hermes-agent-cloudflare-sandbox) in its related resources.
 
 Before publishing:
 
