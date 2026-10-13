@@ -16,6 +16,6 @@ Before publishing:
 
 1. Copy `hermes.mdx` to the path above and apply `coding-agents-index.patch` in the docs repository.
 2. Run that repository's formatting, content, and build checks. This workspace can check MDX syntax but cannot validate Cloudflare's full site build.
-3. Complete the live deployment/model smoke check described in the repository README. Do not describe the stubbed model test as a live Cloudflare success.
+3. Review the [completed production verification](production.md), and rerun the live smoke test if the implementation changes. The deterministic model test and live Cloudflare checks are recorded separately.
 
 The page uses the existing MDX frontmatter and `WranglerConfig` component conventions. `sidebar.order: 4.5` places Hermes after Pi and before the vendor-managed agents. It deliberately omits a `reviewed` date until editorial review.

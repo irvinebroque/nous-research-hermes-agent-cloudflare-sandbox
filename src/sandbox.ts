@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { aiGatewayBaseUrl, readText } from "./helpers";
+import { modelBaseUrl, readText } from "./helpers";
 
 const ca = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const processEnv = {
@@ -9,6 +9,10 @@ const processEnv = {
   TERMINAL_CWD: "/workspace/repo",
   // A placeholder for Hermes's OpenAI-compatible client, not an OpenAI credential.
   OPENAI_API_KEY: "provided-by-worker",
+  CUSTOM_BASE_URL: modelBaseUrl,
+  OPENAI_BASE_URL: modelBaseUrl,
+  // Dependencies are installed in the image; runtime package downloads are blocked.
+  HERMES_DISABLE_LAZY_INSTALLS: "1",
   PYTHONUNBUFFERED: "1",
   GIT_TERMINAL_PROMPT: "0",
   // exec() inherits only PATH. Python and Git must trust the interception CA.
@@ -69,13 +73,7 @@ export class HermesSandbox extends DurableObject<Env> {
   }
 
   private async exec(argv: string[], cwd = "/workspace/repo") {
-    const baseUrl = aiGatewayBaseUrl(this.env.CLOUDFLARE_ACCOUNT_ID);
-    const process = await this.ctx.container!.exec(argv, { cwd, env: {
-      ...processEnv,
-      CUSTOM_BASE_URL: baseUrl,
-      // Hermes requires an explicit URL/key pairing for a custom host.
-      OPENAI_BASE_URL: baseUrl,
-    } });
+    const process = await this.ctx.container!.exec(argv, { cwd, env: processEnv });
     const [stdout, stderr, exitCode] = await Promise.all([
       readText(process.stdout, 1024 * 1024),
       readText(process.stderr, 1024 * 1024),

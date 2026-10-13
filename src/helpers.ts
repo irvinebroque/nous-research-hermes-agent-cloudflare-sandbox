@@ -1,7 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-export const aiGatewayBaseUrl = (accountId: string) =>
-  `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`;
+export const modelBaseUrl = "https://model.internal/v1";
 
 export function authorized(header: string | null, token: string): boolean {
   if (!token || !header) return false;

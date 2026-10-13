@@ -10,14 +10,13 @@ vi.mock("cloudflare:workers", () => {
 import worker from "../src/index";
 import { Outbound } from "../src/outbound";
 import { HermesSandbox } from "../src/sandbox";
-import { aiGatewayBaseUrl, parseTask, readText } from "../src/helpers";
+import { modelBaseUrl, parseTask, readText } from "../src/helpers";
 
 const gatewayEnv = {
-  CLOUDFLARE_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
   AI_GATEWAY_ID: "hermes-test",
-  AI_GATEWAY_API_TOKEN: "real-key",
+  MODEL: "openai/gpt-4.1-mini",
 };
-const modelUrl = `${aiGatewayBaseUrl(gatewayEnv.CLOUDFLARE_ACCOUNT_ID)}/chat/completions`;
+const modelUrl = `${modelBaseUrl}/chat/completions`;
 const body = { repository: "https://github.com/octocat/Hello-World", prompt: "Write NOTES.md" };
 const stream = (text: string) => new Response(text).body!;
 const request = (data = body, signal?: AbortSignal) => new Request("https://example.com/run", {
@@ -27,7 +26,7 @@ const request = (data = body, signal?: AbortSignal) => new Request("https://exam
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("request boundary", () => {
-  it.each(["API_TOKEN", "AI_GATEWAY_API_TOKEN", "AI_GATEWAY_ID", "CLOUDFLARE_ACCOUNT_ID"])("rejects missing %s before allocating a container", async (missing) => {
+  it.each(["API_TOKEN", "AI_GATEWAY_ID"])("rejects missing %s before allocating a container", async (missing) => {
     const allocate = vi.fn();
     const env = { API_TOKEN: "test-token", ...gatewayEnv, [missing]: "", SANDBOX: { newUniqueId: allocate } };
     expect((await worker.fetch(request(), env as never)).status).toBe(503);
@@ -59,50 +58,65 @@ describe("request boundary", () => {
   });
 });
 
-describe("outbound credentials", () => {
-  const outbound = () => new Outbound({} as never, gatewayEnv as never);
+describe("AI Gateway bridge", () => {
+  const inputs = { model: gatewayEnv.MODEL, messages: [{ role: "user", content: "hello" }], stream: true };
+  const modelRequest = (data = inputs) => new Request(modelUrl, {
+    method: "POST", body: JSON.stringify(data),
+    headers: { Authorization: "Bearer placeholder", "cf-aig-gateway-id": "wrong-gateway" },
+  });
+  const outbound = (run = vi.fn()) => new Outbound({} as never, { ...gatewayEnv, AI: { run } } as never);
 
-  it("replaces the placeholder only on the exact model endpoint", async () => {
-    const fetch = vi.fn().mockResolvedValue(new Response("ok"));
-    vi.stubGlobal("fetch", fetch);
-    await outbound().fetch(new Request(modelUrl, {
-      method: "POST", headers: { Authorization: "Bearer placeholder", "cf-aig-gateway-id": "wrong-gateway", "cf-aig-byok-alias": "wrong-key" }, body: '{"messages":[]}',
-    }));
-    const sent = fetch.mock.calls[0][0] as Request;
-    expect(sent.headers.get("Authorization")).toBe("Bearer real-key");
-    expect(sent.url).toBe(modelUrl);
-    expect(sent.headers.get("cf-aig-gateway-id")).toBe("hermes-test");
-    expect(sent.headers.get("cf-aig-skip-cache")).toBe("true");
-    expect(sent.headers.has("cf-aig-byok-alias")).toBe(false);
-    expect(await sent.text()).toBe('{"messages":[]}');
-    expect(sent.redirect).toBe("manual");
+  it("uses the binding and configured gateway, ignoring sandbox credentials", async () => {
+    const run = vi.fn().mockResolvedValue(new Response("ok"));
+    await outbound(run).fetch(modelRequest());
+    expect(run).toHaveBeenCalledWith(gatewayEnv.MODEL, { messages: inputs.messages, stream: true }, {
+      gateway: { id: "hermes-test", skipCache: true }, returnRawResponse: true,
+    });
   });
 
   it("passes through streamed tool calls and upstream errors without rewriting them", async () => {
     const event = 'data: {"choices":[{"delta":{"tool_calls":[]}}]}\n\ndata: [DONE]\n\n';
     const upstream = new Response(stream(event), { headers: { "Content-Type": "text/event-stream" } });
-    const fetch = vi.fn().mockResolvedValueOnce(upstream).mockResolvedValueOnce(new Response("Invalid token", { status: 401 }));
-    vi.stubGlobal("fetch", fetch);
-    const response = await outbound().fetch(new Request(modelUrl, { method: "POST" }));
+    const run = vi.fn().mockResolvedValueOnce(upstream).mockResolvedValueOnce(new Response("No credits", { status: 402 }));
+    const response = await outbound(run).fetch(modelRequest());
     expect(response).toBe(upstream);
     expect(await response.text()).toBe(event);
-    expect((await outbound().fetch(new Request(modelUrl, { method: "POST" }))).status).toBe(401);
+    expect((await outbound(run).fetch(modelRequest())).status).toBe(402);
+  });
+
+  it.each(["openai/gpt-4.1-mini", "openai/gpt-5-mini"])("handles Hermes's default reasoning option for %s", async (model) => {
+    const run = vi.fn().mockResolvedValue(new Response("ok"));
+    const bridge = new Outbound({} as never, { ...gatewayEnv, MODEL: model, AI: { run } } as never);
+    await bridge.fetch(new Request(modelUrl, {
+      method: "POST", body: JSON.stringify({ ...inputs, model, reasoning_effort: "medium" }),
+    }));
+    expect(run.mock.calls[0][1].reasoning_effort).toBe(model === "openai/gpt-4.1-mini" ? undefined : "medium");
+  });
+
+  it("rejects another model, malformed JSON, and oversized requests before inference", async () => {
+    const run = vi.fn();
+    expect((await outbound(run).fetch(modelRequest({ ...inputs, model: "another-model" }))).status).toBe(400);
+    for (const body of ["invalid-json", " ".repeat(4 * 1024 * 1024 + 1)]) {
+      expect((await outbound(run).fetch(new Request(modelUrl, { method: "POST", body }))).status).toBe(400);
+    }
+    expect(run).not.toHaveBeenCalled();
   });
 
   it.each([
     modelUrl.replace("https:", "http:"),
-    modelUrl.replace("api.cloudflare.com", "api.cloudflare.com.evil.com"),
+    modelUrl.replace("model.internal", "model.internal.evil.com"),
     modelUrl.replace("/chat/completions", "/models"),
-    modelUrl.replace(gatewayEnv.CLOUDFLARE_ACCOUNT_ID, "another-account"),
-    modelUrl.replace("api.cloudflare.com", "api.cloudflare.com:444"),
+    modelUrl.replace("model.internal", "model.internal:444"),
     `${modelUrl}?gateway=other`,
     "https://openrouter.ai/api/v1/chat/completions",
     "https://example.com",
   ])("blocks %s", async (url) => {
+    const run = vi.fn();
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
-    expect((await outbound().fetch(new Request(url, { method: "POST" }))).status).toBe(403);
+    expect((await outbound(run).fetch(new Request(url, { method: "POST" }))).status).toBe(403);
     expect(fetch).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
   });
 });
 
@@ -134,10 +148,9 @@ describe("task lifecycle", () => {
     expect(await response.json()).toMatchObject({ stage: "hermes", exitCode: 0, stdout: "Done", diff: "+New file\n" });
     expect(container.exec.mock.calls[2][0]).toContain("custom");
     const processEnv = container.exec.mock.calls[2][1].env;
-    expect(processEnv.CUSTOM_BASE_URL).toBe(aiGatewayBaseUrl(gatewayEnv.CLOUDFLARE_ACCOUNT_ID));
+    expect(processEnv.CUSTOM_BASE_URL).toBe(modelBaseUrl);
     expect(processEnv.OPENAI_BASE_URL).toBe(processEnv.CUSTOM_BASE_URL);
     expect(processEnv.OPENAI_API_KEY).toBe("provided-by-worker");
-    expect(JSON.stringify(container.exec.mock.calls)).not.toContain(gatewayEnv.AI_GATEWAY_API_TOKEN);
     expect(container.exec.mock.calls[2][0].at(-1)).toBe(`--query=${prompt}`);
     expect(container.exec.mock.calls[3][0].at(-1)).toBe("abc123");
     expect(container.start).toHaveBeenCalledWith(expect.objectContaining({ enableInternet: false }));

@@ -27,7 +27,7 @@ class Model(BaseHTTPRequestHandler):
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path != "/client/v4/accounts/test-account/ai/v1/chat/completions":
+        if self.path != "/v1/chat/completions":
             self.send_response(404)
             self.end_headers()
             return
@@ -93,7 +93,8 @@ with tempfile.TemporaryDirectory(prefix="hermes-smoke-") as tmp:
         "PATH": os.environ["PATH"], "HOME": str(root), "HERMES_HOME": str(root / "home"),
         "TERMINAL_ENV": "local", "TERMINAL_CWD": str(repo), "PYTHONUNBUFFERED": "1",
         "OPENAI_API_KEY": "provided-by-worker",
-        "CUSTOM_BASE_URL": f"http://127.0.0.1:{server.server_port}/client/v4/accounts/test-account/ai/v1",
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        "CUSTOM_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
     }
     env["OPENAI_BASE_URL"] = env["CUSTOM_BASE_URL"]
     argv = ["hermes", "chat", "--quiet", "--provider", "custom", "--model", "openai/gpt-4.1-mini",

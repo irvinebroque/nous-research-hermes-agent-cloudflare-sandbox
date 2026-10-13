@@ -6,11 +6,11 @@
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
-    "CLOUDFLARE_ACCOUNT_ID": "replace-with-your-account-id",
     "AI_GATEWAY_ID": "default",
     "MODEL": "openai/gpt-4.1-mini"
   },
-  "secrets": { "required": ["API_TOKEN", "AI_GATEWAY_API_TOKEN"] },
+  "secrets": { "required": ["API_TOKEN"] },
+  "ai": { "binding": "AI" },
   "containers": [{
     "class_name": "HermesSandbox",
     "scheduling_policy": "durable_object",
