@@ -10,7 +10,7 @@ in [cloudflare/cloudflare-docs](https://github.com/cloudflare/cloudflare-docs). 
 
 The existing `/sandbox/coding-agents/` URL is the overview. `coding-agents-index.patch` adds a Hermes card there and adjusts the introduction so it accommodates this standalone example. It does not replace the overview.
 
-The draft embeds the runnable source and links to the [example repository](https://github.com/irvinebroque/nous-research-hermes-agent-cloudflare-sandbox) in its related resources. The repository is private; make it public before publishing that link in the Cloudflare docs.
+The draft explains deployment and links to the [example repository](https://github.com/irvinebroque/nous-research-hermes-agent-cloudflare-sandbox) in its related resources. The repository is private; make it public before publishing that link in the Cloudflare docs.
 
 Before publishing:
 
@@ -18,4 +18,4 @@ Before publishing:
 2. Run that repository's formatting, content, and build checks. This workspace can check MDX syntax but cannot validate Cloudflare's full site build.
 3. Review the [completed production verification](production.md), and rerun the live smoke test if the implementation changes. The deterministic model test and live Cloudflare checks are recorded separately.
 
-The page uses the existing MDX frontmatter and `WranglerConfig` component conventions. `sidebar.order: 4.5` places Hermes after Pi and before the vendor-managed agents. It deliberately omits a `reviewed` date until editorial review.
+The page uses the existing MDX frontmatter and admonition conventions. `sidebar.order: 4.5` places Hermes after Pi and before the vendor-managed agents. It deliberately omits a `reviewed` date until editorial review.

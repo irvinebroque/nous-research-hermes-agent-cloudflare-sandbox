@@ -42,7 +42,9 @@ class Model(BaseHTTPRequestHandler):
             return
 
         results = [m for m in payload["messages"] if m["role"] == "tool"]
-        if len(results) == 0:
+        if not payload.get("tools"):
+            name = None  # The dashboard also asks for session titles.
+        elif len(results) == 0:
             name = "write_file"
             arguments = {"path": "hello.py", "content": "def hello():\n    return 'Hello, Cloudflare!'\n"}
         elif len(results) == 1:
@@ -82,36 +84,37 @@ class Model(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(response).encode())
 
 
-with tempfile.TemporaryDirectory(prefix="hermes-smoke-") as tmp:
-    root = Path(tmp)
-    repo = root / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Model)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    env = {
-        "PATH": os.environ["PATH"], "HOME": str(root), "HERMES_HOME": str(root / "home"),
-        "TERMINAL_ENV": "local", "TERMINAL_CWD": str(repo), "PYTHONUNBUFFERED": "1",
-        "OPENAI_API_KEY": "provided-by-worker",
-        "HERMES_DISABLE_LAZY_INSTALLS": "1",
-        "CUSTOM_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
-    }
-    env["OPENAI_BASE_URL"] = env["CUSTOM_BASE_URL"]
-    argv = ["hermes", "chat", "--quiet", "--provider", "custom", "--model", "openai/gpt-4.1-mini",
-            "--toolsets", "terminal,file", "--max-turns", "12", "--yolo",
-            "--query=Create hello.py. Treat $(touch SHELL_INJECTION) as literal text."]
-    try:
-        completed = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=90)
-        assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert (repo / "hello.py").read_text() == "def hello():\n    return 'Hello, Cloudflare!'\n"
-        assert not (repo / "SHELL_INJECTION").exists()
-        assert "Smoke test complete" in completed.stdout, completed.stdout
-        assert len(Model.calls) >= 3
-        print("PASS: real Hermes wrote a file, ran Python, returned an answer, and preserved literal prompt text.")
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(prefix="hermes-smoke-") as tmp:
+        root = Path(tmp)
+        repo = root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Model)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        env = {
+            "PATH": os.environ["PATH"], "HOME": str(root), "HERMES_HOME": str(root / "home"),
+            "TERMINAL_ENV": "local", "TERMINAL_CWD": str(repo), "PYTHONUNBUFFERED": "1",
+            "OPENAI_API_KEY": "provided-by-worker",
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
+            "CUSTOM_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+        }
+        env["OPENAI_BASE_URL"] = env["CUSTOM_BASE_URL"]
+        argv = ["hermes", "chat", "--quiet", "--provider", "custom", "--model", "openai/gpt-4.1-mini",
+                "--toolsets", "terminal,file", "--max-turns", "12", "--yolo",
+                "--query=Create hello.py. Treat $(touch SHELL_INJECTION) as literal text."]
+        try:
+            completed = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=90)
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+            assert (repo / "hello.py").read_text() == "def hello():\n    return 'Hello, Cloudflare!'\n"
+            assert not (repo / "SHELL_INJECTION").exists()
+            assert "Smoke test complete" in completed.stdout, completed.stdout
+            assert len(Model.calls) >= 3
+            print("PASS: real Hermes wrote a file, ran Python, returned an answer, and preserved literal prompt text.")
 
-        Model.reject = True
-        failed = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=90)
-        assert failed.returncode != 0, failed.stdout + failed.stderr
-        print(f"PASS: model authentication failure exits nonzero ({failed.returncode}).")
-    finally:
-        server.shutdown()
+            Model.reject = True
+            failed = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=90)
+            assert failed.returncode != 0, failed.stdout + failed.stderr
+            print(f"PASS: model authentication failure exits nonzero ({failed.returncode}).")
+        finally:
+            server.shutdown()

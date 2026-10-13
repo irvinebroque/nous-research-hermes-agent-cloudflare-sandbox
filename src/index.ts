@@ -1,28 +1,38 @@
-import { authorized, parseTask, readText } from "./helpers";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 export { HermesSandbox } from "./sandbox";
 export { Outbound } from "./outbound";
 
+const keysets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
 export default {
   async fetch(request, env): Promise<Response> {
-    if (new URL(request.url).pathname !== "/run") return new Response("Not found", { status: 404 });
-    if (request.method !== "POST") return new Response("Use POST", { status: 405, headers: { Allow: "POST" } });
-    if (!env.API_TOKEN || !env.AI_GATEWAY_ID) {
-      return new Response("Configure API_TOKEN and AI_GATEWAY_ID", { status: 503 });
+    if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD || !env.AI_GATEWAY_ID) {
+      return new Response("Configure Access and AI Gateway first", { status: 503 });
     }
-    if (!authorized(request.headers.get("Authorization"), env.API_TOKEN)) {
+    const issuer = `https://${env.ACCESS_TEAM_DOMAIN}`;
+    let keys = keysets.get(issuer);
+    if (!keys) {
+      keys = createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`));
+      keysets.set(issuer, keys);
+    }
+    let identity: string;
+    try {
+      const { payload } = await jwtVerify(request.headers.get("Cf-Access-Jwt-Assertion") ?? "", keys, {
+        issuer, audience: env.ACCESS_AUD, algorithms: ["RS256"], requiredClaims: ["exp"],
+      });
+      // Service tokens also support automated tests when an Access policy allows them.
+      if (typeof payload.sub === "string" && payload.sub) identity = `user:${payload.sub}`;
+      else if (typeof payload.common_name === "string" && payload.common_name) identity = `service:${payload.common_name}`;
+      else throw new Error("Missing identity");
+    } catch {
       return new Response("Unauthorized", { status: 401 });
     }
-
-    let body: string;
-    try {
-      body = JSON.stringify(parseTask(await readText(request.body, 16 * 1024)));
-    } catch {
-      return Response.json({ error: "Send JSON with a public GitHub repository URL and a prompt (1–8000 characters; body ≤16 KiB)." }, { status: 400 });
-    }
-
-    // Each request gets its own container, filesystem, and Hermes home directory.
-    const sandbox = env.SANDBOX.get(env.SANDBOX.newUniqueId());
-    return sandbox.fetch(new Request(request, { body }));
+    const url = new URL(request.url);
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== url.origin) return new Response("Cross-origin requests are disabled", { status: 403 });
+    if (url.pathname === "/auth/logout") return Response.redirect(`${url.origin}/cdn-cgi/access/logout`, 302);
+    // Only verified identities choose a container; paths and caller headers cannot.
+    return env.SANDBOX.get(env.SANDBOX.idFromName(identity)).fetch(request);
   },
 } satisfies ExportedHandler<Env>;

@@ -1,2 +1,2 @@
-# Generate an API_TOKEN with: openssl rand -hex 32
-API_TOKEN="replace-with-a-random-token"
+# No API keys are needed. Configure Access and AI Gateway identifiers in wrangler.jsonc.
+# Never copy your Wrangler login token into this application.

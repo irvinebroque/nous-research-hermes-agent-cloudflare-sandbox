@@ -7,9 +7,10 @@
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
     "AI_GATEWAY_ID": "default",
-    "MODEL": "openai/gpt-4.1-mini"
+    "MODEL": "openai/gpt-4.1-mini",
+    "ACCESS_TEAM_DOMAIN": "YOUR-TEAM.cloudflareaccess.com",
+    "ACCESS_AUD": "YOUR-ACCESS-APPLICATION-AUD"
   },
-  "secrets": { "required": ["API_TOKEN"] },
   "ai": { "binding": "AI" },
   "containers": [{
     "class_name": "HermesSandbox",

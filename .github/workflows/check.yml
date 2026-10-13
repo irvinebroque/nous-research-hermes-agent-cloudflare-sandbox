@@ -5,7 +5,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,5 +18,9 @@ jobs:
       - run: docker build --platform linux/amd64 -t hermes-cloudflare-sandbox:test .
       - run: |
           docker run --rm --platform linux/amd64 --network none \
-            -v "$PWD/test/hermes-smoke.py:/test/hermes-smoke.py:ro" \
+            -v "$PWD/test:/test:ro" \
             hermes-cloudflare-sandbox:test python3 /test/hermes-smoke.py
+      - run: |
+          docker run --rm --platform linux/amd64 --network none \
+            -v "$PWD/test:/test:ro" \
+            hermes-cloudflare-sandbox:test python3 /test/dashboard-smoke.py
