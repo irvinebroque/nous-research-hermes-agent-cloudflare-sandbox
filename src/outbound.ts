@@ -1,4 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { aiGatewayBaseUrl } from "./helpers";
 
 export class Outbound extends WorkerEntrypoint<Env> {
   async fetch(request: Request): Promise<Response> {
@@ -7,9 +8,14 @@ export class Outbound extends WorkerEntrypoint<Env> {
       return new Response("HTTPS only", { status: 403 });
     }
 
-    if (url.hostname === "openrouter.ai" && url.pathname === "/api/v1/chat/completions" && request.method === "POST") {
-      const headers = new Headers(request.headers);
-      headers.set("Authorization", `Bearer ${this.env.OPENROUTER_API_KEY}`);
+    if (url.href === `${aiGatewayBaseUrl(this.env.CLOUDFLARE_ACCOUNT_ID)}/chat/completions` && request.method === "POST") {
+      // The Worker selects the gateway and credentials, not sandbox-supplied headers.
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.env.AI_GATEWAY_API_TOKEN}`,
+        "cf-aig-gateway-id": this.env.AI_GATEWAY_ID,
+        "cf-aig-skip-cache": "true",
+      });
       // Do not follow redirects with a credential attached.
       return fetch(new Request(request, { headers, redirect: "manual" }));
     }

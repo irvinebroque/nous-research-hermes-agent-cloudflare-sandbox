@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { readText } from "./helpers";
+import { aiGatewayBaseUrl, readText } from "./helpers";
 
 const ca = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const processEnv = {
@@ -7,7 +7,8 @@ const processEnv = {
   HERMES_HOME: "/tmp/hermes-home",
   TERMINAL_ENV: "local",
   TERMINAL_CWD: "/workspace/repo",
-  OPENROUTER_API_KEY: "provided-by-worker",
+  // A placeholder for Hermes's OpenAI-compatible client, not an OpenAI credential.
+  OPENAI_API_KEY: "provided-by-worker",
   PYTHONUNBUFFERED: "1",
   GIT_TERMINAL_PROMPT: "0",
   // exec() inherits only PATH. Python and Git must trust the interception CA.
@@ -55,7 +56,7 @@ export class HermesSandbox extends DurableObject<Env> {
     if (base.exitCode !== 0) return { stage: "clone", ...base, diff: "" };
 
     const agent = await this.exec([
-      "hermes", "chat", "--quiet", "--provider", "openrouter", "--model", this.env.MODEL,
+      "hermes", "chat", "--quiet", "--provider", "custom", "--model", this.env.MODEL,
       "--toolsets", "terminal,file", "--max-turns", "12", "--yolo", `--query=${task.prompt}`,
     ]);
     // Compare to the original commit even if Hermes staged or committed changes.
@@ -68,7 +69,13 @@ export class HermesSandbox extends DurableObject<Env> {
   }
 
   private async exec(argv: string[], cwd = "/workspace/repo") {
-    const process = await this.ctx.container!.exec(argv, { cwd, env: processEnv });
+    const baseUrl = aiGatewayBaseUrl(this.env.CLOUDFLARE_ACCOUNT_ID);
+    const process = await this.ctx.container!.exec(argv, { cwd, env: {
+      ...processEnv,
+      CUSTOM_BASE_URL: baseUrl,
+      // Hermes requires an explicit URL/key pairing for a custom host.
+      OPENAI_BASE_URL: baseUrl,
+    } });
     const [stdout, stderr, exitCode] = await Promise.all([
       readText(process.stdout, 1024 * 1024),
       readText(process.stderr, 1024 * 1024),

@@ -10,13 +10,14 @@ products:
   - containers
   - durable-objects
   - workers
+  - ai-gateway
 ---
 
 import { WranglerConfig } from "~/components";
 
 Run [Hermes Agent](https://github.com/nousresearch/hermes-agent) in a Linux sandbox on [Cloudflare Containers](/containers/). Send a public GitHub repository and a prompt to a Worker. Hermes reads files, edits code, and runs commands inside the sandbox. The Worker returns the agent's answer and a Git diff, then destroys the container.
 
-Hermes calls a model through [OpenRouter](https://openrouter.ai/docs/quickstart). Your Worker adds the API key to model requests, so the real key never enters the sandbox. The sandbox can reach only GitHub and the model endpoint.
+Hermes calls a model through [AI Gateway](/ai-gateway/). Your Worker adds the Cloudflare API token and gateway ID to model requests, so the real token never enters the sandbox. The sandbox can reach only GitHub and the model endpoint.
 
 This example runs one short task per connected HTTP request. For background tasks with polling and reconnects, start with [Build a coding agent runner](/sandbox/get-started/build-a-coding-agent-runner/).
 
@@ -24,7 +25,8 @@ This example runs one short task per connected HTTP request. For background task
 
 - A Cloudflare account that meets the [Containers prerequisites](/containers/get-started/).
 - Node.js 22 or later and [Docker](https://docs.docker.com/get-started/get-docker/) running locally.
-- An [OpenRouter API key](https://openrouter.ai/settings/keys) with credit for a model that supports tool calling.
+- [AI Gateway credits](/ai-gateway/features/unified-billing/) for model inference. Local development also uses these credits.
+- A [Cloudflare API token](/fundamentals/api/get-started/create-token/) scoped to your account with **Account > Workers AI > Read**. The inference endpoint requires this permission even for third-party models. A token with only an AI Gateway management permission will not work.
 
 ## 1. Create the project
 
@@ -48,8 +50,12 @@ Create `wrangler.jsonc`:
   "compatibility_date": "2026-10-13",
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "vars": { "MODEL": "anthropic/claude-sonnet-4.6" },
-  "secrets": { "required": ["API_TOKEN", "OPENROUTER_API_KEY"] },
+  "vars": {
+    "CLOUDFLARE_ACCOUNT_ID": "replace-with-your-account-id",
+    "AI_GATEWAY_ID": "default",
+    "MODEL": "openai/gpt-4.1-mini"
+  },
+  "secrets": { "required": ["API_TOKEN", "AI_GATEWAY_API_TOKEN"] },
   "containers": [{
     "class_name": "HermesSandbox",
     "scheduling_policy": "durable_object",
@@ -65,6 +71,8 @@ Create `wrangler.jsonc`:
 ```
 
 </WranglerConfig>
+
+Replace `CLOUDFLARE_ACCOUNT_ID` with your [account ID](/fundamentals/account/find-account-and-zone-ids/). Keep `AI_GATEWAY_ID` as `default`, which is created on the first authenticated request, or use an [existing gateway](/ai-gateway/get-started/) in the same account. The default model, [`openai/gpt-4.1-mini`](/ai/models/openai/gpt-4.1-mini/), supports Chat Completions and function tools. AI Gateway supplies the provider credentials using your Cloudflare credits.
 
 Each request gets a new `HermesSandbox` Durable Object and its own container. Wrangler builds the image named `hermes`; the Durable Object selects it with `container.images.hermes`. `enable_request_signal` lets the Worker stop work when a client disconnects.
 
@@ -112,7 +120,7 @@ Create the following four files. This example uses the native [Container process
 
 ### Authenticate and validate requests
 
-`src/index.ts` rejects invalid requests before it allocates a sandbox. `API_TOKEN` is your caller's bearer token, separate from the model key.
+`src/index.ts` rejects invalid requests before it allocates a sandbox. `API_TOKEN` is your caller's bearer token, separate from the Cloudflare inference token.
 
 ```ts title="src/index.ts"
 import { authorized, parseTask, readText } from "./helpers";
@@ -124,8 +132,8 @@ export default {
   async fetch(request, env): Promise<Response> {
     if (new URL(request.url).pathname !== "/run") return new Response("Not found", { status: 404 });
     if (request.method !== "POST") return new Response("Use POST", { status: 405, headers: { Allow: "POST" } });
-    if (!env.API_TOKEN || !env.OPENROUTER_API_KEY) {
-      return new Response("Configure API_TOKEN and OPENROUTER_API_KEY", { status: 503 });
+    if (!env.API_TOKEN || !env.AI_GATEWAY_API_TOKEN || !env.AI_GATEWAY_ID || !/^[a-f0-9]{32}$/i.test(env.CLOUDFLARE_ACCOUNT_ID)) {
+      return new Response("Configure API_TOKEN, AI_GATEWAY_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and AI_GATEWAY_ID", { status: 503 });
     }
     if (!authorized(request.headers.get("Authorization"), env.API_TOKEN)) {
       return new Response("Unauthorized", { status: 401 });
@@ -151,6 +159,9 @@ export default {
 
 ```ts title="src/helpers.ts"
 import { timingSafeEqual } from "node:crypto";
+
+export const aiGatewayBaseUrl = (accountId: string) =>
+  `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`;
 
 export function authorized(header: string | null, token: string): boolean {
   if (!token || !header) return false;
@@ -187,12 +198,13 @@ export function parseTask(body: string): { repository: string; prompt: string } 
 }
 ```
 
-### Keep the model key in the Worker
+### Call AI Gateway from the Worker
 
-`src/outbound.ts` allows only the destinations the example needs. It replaces the placeholder key only on an HTTPS POST to the exact OpenRouter chat-completions endpoint. Redirects are returned to the container instead of followed with a credential attached.
+`src/outbound.ts` allows only the destinations the example needs. It replaces the placeholder key only on an HTTPS POST to the configured account's `/ai/v1/chat/completions` endpoint. The Worker sets `cf-aig-gateway-id` and skips response caching for these agent calls. Redirects are returned to the container instead of followed with a credential attached.
 
 ```ts title="src/outbound.ts"
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { aiGatewayBaseUrl } from "./helpers";
 
 export class Outbound extends WorkerEntrypoint<Env> {
   async fetch(request: Request): Promise<Response> {
@@ -201,9 +213,14 @@ export class Outbound extends WorkerEntrypoint<Env> {
       return new Response("HTTPS only", { status: 403 });
     }
 
-    if (url.hostname === "openrouter.ai" && url.pathname === "/api/v1/chat/completions" && request.method === "POST") {
-      const headers = new Headers(request.headers);
-      headers.set("Authorization", `Bearer ${this.env.OPENROUTER_API_KEY}`);
+    if (url.href === `${aiGatewayBaseUrl(this.env.CLOUDFLARE_ACCOUNT_ID)}/chat/completions` && request.method === "POST") {
+      // The Worker selects the gateway and credentials, not sandbox-supplied headers.
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.env.AI_GATEWAY_API_TOKEN}`,
+        "cf-aig-gateway-id": this.env.AI_GATEWAY_ID,
+        "cf-aig-skip-cache": "true",
+      });
       // Do not follow redirects with a credential attached.
       return fetch(new Request(request, { headers, redirect: "manual" }));
     }
@@ -224,7 +241,7 @@ export class Outbound extends WorkerEntrypoint<Env> {
 
 ```ts title="src/sandbox.ts"
 import { DurableObject } from "cloudflare:workers";
-import { readText } from "./helpers";
+import { aiGatewayBaseUrl, readText } from "./helpers";
 
 const ca = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const processEnv = {
@@ -232,7 +249,8 @@ const processEnv = {
   HERMES_HOME: "/tmp/hermes-home",
   TERMINAL_ENV: "local",
   TERMINAL_CWD: "/workspace/repo",
-  OPENROUTER_API_KEY: "provided-by-worker",
+  // A placeholder for Hermes's OpenAI-compatible client, not an OpenAI credential.
+  OPENAI_API_KEY: "provided-by-worker",
   PYTHONUNBUFFERED: "1",
   GIT_TERMINAL_PROMPT: "0",
   // exec() inherits only PATH. Python and Git must trust the interception CA.
@@ -280,7 +298,7 @@ export class HermesSandbox extends DurableObject<Env> {
     if (base.exitCode !== 0) return { stage: "clone", ...base, diff: "" };
 
     const agent = await this.exec([
-      "hermes", "chat", "--quiet", "--provider", "openrouter", "--model", this.env.MODEL,
+      "hermes", "chat", "--quiet", "--provider", "custom", "--model", this.env.MODEL,
       "--toolsets", "terminal,file", "--max-turns", "12", "--yolo", `--query=${task.prompt}`,
     ]);
     // Compare to the original commit even if Hermes staged or committed changes.
@@ -293,7 +311,13 @@ export class HermesSandbox extends DurableObject<Env> {
   }
 
   private async exec(argv: string[], cwd = "/workspace/repo") {
-    const process = await this.ctx.container!.exec(argv, { cwd, env: processEnv });
+    const baseUrl = aiGatewayBaseUrl(this.env.CLOUDFLARE_ACCOUNT_ID);
+    const process = await this.ctx.container!.exec(argv, { cwd, env: {
+      ...processEnv,
+      CUSTOM_BASE_URL: baseUrl,
+      // Hermes requires an explicit URL/key pairing for a custom host.
+      OPENAI_BASE_URL: baseUrl,
+    } });
     const [stdout, stderr, exitCode] = await Promise.all([
       readText(process.stdout, 1024 * 1024),
       readText(process.stderr, 1024 * 1024),
@@ -305,6 +329,8 @@ export class HermesSandbox extends DurableObject<Env> {
 ```
 
 `TERMINAL_ENV=local` runs Hermes's commands inside the container. `--quiet` runs one query and exits. `--yolo` permits unattended commands in this disposable environment. The prompt is an argument in an array, so shell syntax in the prompt is passed literally.
+
+Hermes's `custom` provider uses the [AI Gateway REST endpoint](/ai-gateway/usage/rest-api/#aiv1chatcompletions--openai-compatible). `CUSTOM_BASE_URL` selects that endpoint; `OPENAI_BASE_URL` explicitly pairs it with the placeholder `OPENAI_API_KEY`. These are Hermes client settings, not an OpenAI credential. Hermes's provider named `ai-gateway` targets Vercel, so this example uses `custom` for Cloudflare.
 
 Processes started with `exec()` inherit only `PATH`. The example explicitly sets Hermes's home, working directory, placeholder key, and the CA variables that Python and Git need for intercepted HTTPS.
 
@@ -329,7 +355,7 @@ Create `.dev.vars`, replacing both values:
 
 ```dotenv title=".dev.vars"
 API_TOKEN="your-generated-token"
-OPENROUTER_API_KEY="your-openrouter-key"
+AI_GATEWAY_API_TOKEN="your-cloudflare-api-token"
 ```
 
 Start the Worker:
@@ -364,13 +390,13 @@ Look for a new `NOTES.md` file. The exact text depends on the model. The Worker 
 ```sh
 npx wrangler login
 npx wrangler secret put API_TOKEN
-npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put AI_GATEWAY_API_TOKEN
 npx wrangler deploy
 ```
 
 Wrangler may ask to create the Worker when adding the first secret. `.dev.vars` is only for local development; the `secret put` commands configure deployed credentials. Docker must be running to build the image.
 
-Set `WORKER_URL` to the deployed URL and repeat the request. A first image rollout can take a few minutes. To select another model, change `MODEL` in `wrangler.jsonc` to an OpenRouter model ID with tool support and deploy again.
+Set `WORKER_URL` to the deployed URL and repeat the request. A first image rollout can take a few minutes. To select another model, change `MODEL` in `wrangler.jsonc` to a [Cloudflare catalog model ID](/ai/models/) that supports Chat Completions and function tools and deploy again.
 
 ## Task lifetime and limits
 
@@ -389,12 +415,15 @@ The example accepts public GitHub repositories on their default branch. It does 
 | `422`, `stage: clone` | Git failed. Check that the repository is public and the URL is correct. |
 | `422`, `stage: hermes` | Hermes exited nonzero. Inspect `stdout` and `stderr` for provider, credit, or iteration-limit errors. |
 | `502` | Container failure, five-minute deadline, or command output over 1 MiB per stream. |
-| `503` | A required Worker secret is missing. |
+| `503` | A Worker secret or gateway ID is missing, or the account ID is invalid. |
+
+If Hermes reports an upstream `401` with code `10000`, check that `AI_GATEWAY_API_TOKEN` has **Workers AI > Read** for the configured account. Check the gateway ID and available Gateway credits for other inference errors.
 
 A successful Hermes exit reports that its run completed. Review the patch and test generated code before using it.
 
 ## Related resources
 
+- [AI Gateway REST API](/ai-gateway/usage/rest-api/)
 - [Hermes CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands)
 - [Container process API](/containers/api/durable-object-container/#exec)
 - [Call an authenticated API from a sandbox](/sandbox/network/call-an-authenticated-api/)

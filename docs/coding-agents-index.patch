@@ -18,7 +18,7 @@
 +		title="Hermes"
 +		href="/sandbox/coding-agents/hermes/"
 +		icon="terminal"
-+		description="Run Hermes Agent on a public GitHub repository and return its changes as a diff."
++		description="Run Hermes Agent with AI Gateway on a public GitHub repository and return a diff."
  	/>
  </CardGrid>
  

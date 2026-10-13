@@ -10,8 +10,14 @@ vi.mock("cloudflare:workers", () => {
 import worker from "../src/index";
 import { Outbound } from "../src/outbound";
 import { HermesSandbox } from "../src/sandbox";
-import { parseTask, readText } from "../src/helpers";
+import { aiGatewayBaseUrl, parseTask, readText } from "../src/helpers";
 
+const gatewayEnv = {
+  CLOUDFLARE_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+  AI_GATEWAY_ID: "hermes-test",
+  AI_GATEWAY_API_TOKEN: "real-key",
+};
+const modelUrl = `${aiGatewayBaseUrl(gatewayEnv.CLOUDFLARE_ACCOUNT_ID)}/chat/completions`;
 const body = { repository: "https://github.com/octocat/Hello-World", prompt: "Write NOTES.md" };
 const stream = (text: string) => new Response(text).body!;
 const request = (data = body, signal?: AbortSignal) => new Request("https://example.com/run", {
@@ -21,9 +27,16 @@ const request = (data = body, signal?: AbortSignal) => new Request("https://exam
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("request boundary", () => {
+  it.each(["API_TOKEN", "AI_GATEWAY_API_TOKEN", "AI_GATEWAY_ID", "CLOUDFLARE_ACCOUNT_ID"])("rejects missing %s before allocating a container", async (missing) => {
+    const allocate = vi.fn();
+    const env = { API_TOKEN: "test-token", ...gatewayEnv, [missing]: "", SANDBOX: { newUniqueId: allocate } };
+    expect((await worker.fetch(request(), env as never)).status).toBe(503);
+    expect(allocate).not.toHaveBeenCalled();
+  });
+
   it("does not allocate a container for unauthorized or invalid input", async () => {
     const allocate = vi.fn();
-    const env = { API_TOKEN: "test-token", OPENROUTER_API_KEY: "key", SANDBOX: { newUniqueId: allocate } };
+    const env = { API_TOKEN: "test-token", ...gatewayEnv, SANDBOX: { newUniqueId: allocate } };
     const unauthorized = request();
     unauthorized.headers.delete("Authorization");
     expect((await worker.fetch(unauthorized, env as never)).status).toBe(401);
@@ -47,20 +60,45 @@ describe("request boundary", () => {
 });
 
 describe("outbound credentials", () => {
-  const outbound = () => new Outbound({} as never, { OPENROUTER_API_KEY: "real-key" } as never);
+  const outbound = () => new Outbound({} as never, gatewayEnv as never);
 
   it("replaces the placeholder only on the exact model endpoint", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response("ok"));
     vi.stubGlobal("fetch", fetch);
-    await outbound().fetch(new Request("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST", headers: { Authorization: "Bearer placeholder" }, body: "{}",
+    await outbound().fetch(new Request(modelUrl, {
+      method: "POST", headers: { Authorization: "Bearer placeholder", "cf-aig-gateway-id": "wrong-gateway", "cf-aig-byok-alias": "wrong-key" }, body: '{"messages":[]}',
     }));
     const sent = fetch.mock.calls[0][0] as Request;
     expect(sent.headers.get("Authorization")).toBe("Bearer real-key");
+    expect(sent.url).toBe(modelUrl);
+    expect(sent.headers.get("cf-aig-gateway-id")).toBe("hermes-test");
+    expect(sent.headers.get("cf-aig-skip-cache")).toBe("true");
+    expect(sent.headers.has("cf-aig-byok-alias")).toBe(false);
+    expect(await sent.text()).toBe('{"messages":[]}');
     expect(sent.redirect).toBe("manual");
   });
 
-  it.each(["http://openrouter.ai/api/v1/chat/completions", "https://openrouter.ai.evil.com/api/v1/chat/completions", "https://openrouter.ai/api/v1/keys", "https://example.com", "https://openrouter.ai:444/api/v1/chat/completions"])("blocks %s", async (url) => {
+  it("passes through streamed tool calls and upstream errors without rewriting them", async () => {
+    const event = 'data: {"choices":[{"delta":{"tool_calls":[]}}]}\n\ndata: [DONE]\n\n';
+    const upstream = new Response(stream(event), { headers: { "Content-Type": "text/event-stream" } });
+    const fetch = vi.fn().mockResolvedValueOnce(upstream).mockResolvedValueOnce(new Response("Invalid token", { status: 401 }));
+    vi.stubGlobal("fetch", fetch);
+    const response = await outbound().fetch(new Request(modelUrl, { method: "POST" }));
+    expect(response).toBe(upstream);
+    expect(await response.text()).toBe(event);
+    expect((await outbound().fetch(new Request(modelUrl, { method: "POST" }))).status).toBe(401);
+  });
+
+  it.each([
+    modelUrl.replace("https:", "http:"),
+    modelUrl.replace("api.cloudflare.com", "api.cloudflare.com.evil.com"),
+    modelUrl.replace("/chat/completions", "/models"),
+    modelUrl.replace(gatewayEnv.CLOUDFLARE_ACCOUNT_ID, "another-account"),
+    modelUrl.replace("api.cloudflare.com", "api.cloudflare.com:444"),
+    `${modelUrl}?gateway=other`,
+    "https://openrouter.ai/api/v1/chat/completions",
+    "https://example.com",
+  ])("blocks %s", async (url) => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
     expect((await outbound().fetch(new Request(url, { method: "POST" }))).status).toBe(403);
@@ -83,7 +121,7 @@ function fixture(agentCode = 0) {
       return { stdout: stream(next.stdout), stderr: stream(next.stderr), exitCode: Promise.resolve(next.exitCode) };
     }),
   };
-  const sandbox = new HermesSandbox({ container, exports: { Outbound: {} } } as never, { MODEL: "test-model" } as never);
+  const sandbox = new HermesSandbox({ container, exports: { Outbound: {} } } as never, { ...gatewayEnv, MODEL: "test-model" } as never);
   return { sandbox, container };
 }
 
@@ -94,6 +132,12 @@ describe("task lifecycle", () => {
     const response = await sandbox.fetch(request({ ...body, prompt }));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ stage: "hermes", exitCode: 0, stdout: "Done", diff: "+New file\n" });
+    expect(container.exec.mock.calls[2][0]).toContain("custom");
+    const processEnv = container.exec.mock.calls[2][1].env;
+    expect(processEnv.CUSTOM_BASE_URL).toBe(aiGatewayBaseUrl(gatewayEnv.CLOUDFLARE_ACCOUNT_ID));
+    expect(processEnv.OPENAI_BASE_URL).toBe(processEnv.CUSTOM_BASE_URL);
+    expect(processEnv.OPENAI_API_KEY).toBe("provided-by-worker");
+    expect(JSON.stringify(container.exec.mock.calls)).not.toContain(gatewayEnv.AI_GATEWAY_API_TOKEN);
     expect(container.exec.mock.calls[2][0].at(-1)).toBe(`--query=${prompt}`);
     expect(container.exec.mock.calls[3][0].at(-1)).toBe("abc123");
     expect(container.start).toHaveBeenCalledWith(expect.objectContaining({ enableInternet: false }));

@@ -1,3 +1,4 @@
 # Generate an API_TOKEN with: openssl rand -hex 32
 API_TOKEN="replace-with-a-random-token"
-OPENROUTER_API_KEY="replace-with-your-openrouter-key"
+# Cloudflare API token with Account > Workers AI > Read for your account.
+AI_GATEWAY_API_TOKEN="replace-with-your-cloudflare-api-token"

@@ -7,8 +7,8 @@ export default {
   async fetch(request, env): Promise<Response> {
     if (new URL(request.url).pathname !== "/run") return new Response("Not found", { status: 404 });
     if (request.method !== "POST") return new Response("Use POST", { status: 405, headers: { Allow: "POST" } });
-    if (!env.API_TOKEN || !env.OPENROUTER_API_KEY) {
-      return new Response("Configure API_TOKEN and OPENROUTER_API_KEY", { status: 503 });
+    if (!env.API_TOKEN || !env.AI_GATEWAY_API_TOKEN || !env.AI_GATEWAY_ID || !/^[a-f0-9]{32}$/i.test(env.CLOUDFLARE_ACCOUNT_ID)) {
+      return new Response("Configure API_TOKEN, AI_GATEWAY_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and AI_GATEWAY_ID", { status: 503 });
     }
     if (!authorized(request.headers.get("Authorization"), env.API_TOKEN)) {
       return new Response("Unauthorized", { status: 401 });

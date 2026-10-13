@@ -7,13 +7,13 @@ sequenceDiagram
     participant Client
     participant Worker
     participant Sandbox as Container / Hermes
-    participant Model as OpenRouter
+    participant Model as AI Gateway
     Client->>Worker: POST /run (repository, prompt)
     Worker->>Worker: Check API_TOKEN
     Worker->>Sandbox: Start a fresh sandbox; clone repository
     Worker->>Sandbox: Run hermes chat
     Sandbox->>Worker: Model request with placeholder key
-    Worker->>Model: Add real OPENROUTER_API_KEY
+    Worker->>Model: Add Cloudflare token and gateway ID
     Model-->>Sandbox: Reply / tool calls, through Worker
     Sandbox->>Sandbox: Read files, edit code, run commands
     Sandbox-->>Worker: Answer, exit code, diff
@@ -21,11 +21,17 @@ sequenceDiagram
     Worker-->>Client: JSON result
 ```
 
-The Python agent and its tools run in the container. The Worker handles authentication, lifecycle, and outbound credentials. Inference runs on the model selected through OpenRouter.
+The Python agent and its tools run in the container. The Worker handles authentication, lifecycle, and outbound credentials. Inference runs through [AI Gateway](https://developers.cloudflare.com/ai-gateway/) using Cloudflare credits. No separate model-provider key is needed.
 
 ## Run locally
 
-You need Node.js 22 or newer, Docker running, and an [OpenRouter API key](https://openrouter.ai/settings/keys) with credit. From this repository's root:
+You need Node.js 22 or newer, Docker running, and a Cloudflare account with [AI Gateway credits](https://developers.cloudflare.com/ai-gateway/features/unified-billing/). Configure inference first:
+
+1. Find your [Cloudflare account ID](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/) and set `CLOUDFLARE_ACCOUNT_ID` in `wrangler.jsonc`.
+2. Keep `AI_GATEWAY_ID` as `default` (created on the first authenticated request), or set it to an [existing gateway](https://developers.cloudflare.com/ai-gateway/get-started/) in that account.
+3. Create a [Cloudflare API token](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/) scoped to that account with **Account > Workers AI > Read**. The [inference REST endpoint](https://developers.cloudflare.com/ai-gateway/usage/rest-api/#authentication) requires this permission even for third-party models. An AI Gateway management token alone cannot call it.
+
+From this repository's root:
 
 ```sh
 npm ci
@@ -33,7 +39,7 @@ cp .dev.vars.example .dev.vars
 openssl rand -hex 32
 ```
 
-Edit `.dev.vars`: use the generated random value for `API_TOKEN` and your OpenRouter key for `OPENROUTER_API_KEY`. The first protects this example's HTTP endpoint; the second pays for model inference. `.dev.vars` is ignored by Git and excluded from the Docker build context.
+Edit `.dev.vars`: use the generated random value for `API_TOKEN` and your Cloudflare API token for `AI_GATEWAY_API_TOKEN`. The first protects this example's HTTP endpoint; the second authorizes inference through AI Gateway. Local development uses real Gateway credits. `.dev.vars` is ignored by Git and excluded from the Docker build context.
 
 ```sh
 npm run dev
@@ -73,13 +79,13 @@ You need a Cloudflare account with Containers enabled and a Workers Paid plan. D
 ```sh
 npx wrangler login
 npx wrangler secret put API_TOKEN
-npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put AI_GATEWAY_API_TOKEN
 npm run deploy
 ```
 
 Use a random token for `API_TOKEN`. Wrangler may ask to create the Worker when adding its first secret. Local `.dev.vars` values are not uploaded automatically. Set `WORKER_URL` to the `workers.dev` URL printed by Wrangler and send the same request. Image rollout can take a few minutes after a first deployment.
 
-Change `MODEL` in `wrangler.jsonc` to select another [OpenRouter model with tool support](https://openrouter.ai/models). The example defaults to `anthropic/claude-sonnet-4.6`.
+The default model is [`openai/gpt-4.1-mini`](https://developers.cloudflare.com/ai/models/openai/gpt-4.1-mini/). To change `MODEL` in `wrangler.jsonc`, choose a [Cloudflare catalog model](https://developers.cloudflare.com/ai/models/) that supports **Chat Completions and function tools**. Models that accept only Anthropic Messages or Responses need a different Hermes API mode.
 
 ## Read the implementation
 
@@ -88,16 +94,18 @@ Change `MODEL` in `wrangler.jsonc` to select another [OpenRouter model with tool
 | [`Dockerfile`](Dockerfile) | Install a pinned Hermes release and its locked Python dependencies. |
 | [`src/index.ts`](src/index.ts) | Authenticate, validate the request, allocate a fresh sandbox. |
 | [`src/sandbox.ts`](src/sandbox.ts) | Clone, run Hermes, read the diff, and destroy the container. |
-| [`src/outbound.ts`](src/outbound.ts) | Allow GitHub/model requests; inject the real model key. |
+| [`src/outbound.ts`](src/outbound.ts) | Allow GitHub/model requests; select AI Gateway and inject the Cloudflare token. |
 | [`src/helpers.ts`](src/helpers.ts) | Compare tokens, validate input, and bound output buffering. |
-| [`wrangler.jsonc`](wrangler.jsonc) | Declare the image, Durable Object binding, model, and required secrets. |
+| [`wrangler.jsonc`](wrangler.jsonc) | Declare the image, Durable Object binding, account, gateway, model, and required secrets. |
 
 This follows the current [Sandboxes architecture](https://developers.cloudflare.com/sandbox/): a Durable Object controls a Linux container through `this.ctx.container`. Process execution is built into the [Container API](https://developers.cloudflare.com/containers/api/durable-object-container/). The `@cloudflare/sandbox` 1.x package supplies optional file and storage helpers; this example doesn't need them. The old `getSandbox()` / `Sandbox` class examples are for SDK 0.x.
+
+The Worker sets `CUSTOM_BASE_URL` to `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1`. It also sets `OPENAI_BASE_URL` to the same URL and `OPENAI_API_KEY` to a **placeholder**: Hermes requires an explicit URL/key pairing for custom endpoints. Those variable names describe the compatible client protocol; no OpenAI key is used. The outbound handler supplies the real Cloudflare token and `cf-aig-gateway-id` header. It passes the streaming response through unchanged.
 
 The important Hermes invocation is:
 
 ```sh
-hermes chat --quiet --provider openrouter --model anthropic/claude-sonnet-4.6 \
+hermes chat --quiet --provider custom --model openai/gpt-4.1-mini \
   --toolsets terminal,file --max-turns 12 --yolo --query="Your task"
 ```
 
@@ -110,11 +118,11 @@ The image pins Hermes v0.21.5 (`v2026.9.24`, commit `f97608f178d1ffeca59860195ab
 - **One short task per request.** The request must stay connected. Five minutes includes startup, cloning, and inference. There is no job queue, reconnect, or retry protocol. Use the [background coding-agent runner](https://developers.cloudflare.com/sandbox/get-started/build-a-coding-agent-runner/) for longer tasks.
 - **Fresh state each time.** Files, sessions, memory, and learned skills disappear when the container is destroyed. This demonstrates Hermes's coding tools, not its persistent personal-assistant experience. The returned diff is the artifact to keep.
 - **Public GitHub repositories.** The default branch is cloned at depth one. Submodules, Git LFS, private repositories, and arbitrary Git hosts are outside this example.
-- **Restricted network.** The container has no direct Internet access. The Worker allows HTTPS to `github.com` and POSTs to the OpenRouter chat-completions endpoint. Package registries and web browsing are blocked. Install task dependencies in the image. Allowed model/GitHub traffic can carry repository data out of the sandbox.
+- **Restricted network.** The container has no direct Internet access. The Worker allows HTTPS to `github.com` and POSTs to the configured account's AI Gateway chat-completions endpoint. Package registries and web browsing are blocked. Install task dependencies in the image. Allowed model/GitHub traffic can carry repository data out of the sandbox.
 - **Bounded output.** Request bodies are limited to 16 KiB, prompts to 8,000 characters, and each command's stdout/stderr to 1 MiB. Exceeding a limit fails the request; output is not silently truncated.
 - **Trusted caller demo.** Anyone holding `API_TOKEN` can start containers and spend the configured model credit. Multiuser authorization and per-user quotas are not implemented.
 
-HTTP `200` means Hermes exited successfully. `422` includes a nonzero clone or Hermes exit code and any available diff; inspect both `stdout` and `stderr` for errors. `400` means invalid input, `401` means missing/wrong authentication, `503` means missing secrets, and `502` means a sandbox/timeout/output failure. A successful exit does not prove the generated code is correct; inspect the diff and run its tests.
+HTTP `200` means Hermes exited successfully. `422` includes a nonzero clone or Hermes exit code and any available diff; inspect both `stdout` and `stderr` for errors. `400` means invalid input, `401` means missing/wrong authentication, `503` means missing secrets or invalid account/gateway configuration, and `502` means a sandbox/timeout/output failure. A successful exit does not prove the generated code is correct; inspect the diff and run its tests.
 
 Disconnect cleanup runs when the runtime delivers the request's abort signal. In local Wrangler testing, closing the client did not promptly deliver that signal: the task finished and then cleaned up. The separate five-minute deadline and inactivity timeout bound the container lifetime; closing the client is not a verified immediate cancellation mechanism.
 
@@ -130,6 +138,6 @@ docker run --rm --platform linux/amd64 --network none \
   hermes-cloudflare-sandbox:test python3 /test/hermes-smoke.py
 ```
 
-The smoke test runs the real Hermes CLI against a deterministic local model stub. It checks file writing, terminal execution, literal prompt handling, and authentication-failure exit codes without a paid model call. Unit tests cover HTTP validation, outbound credential routing, and container cleanup. See [`docs/research.md`](docs/research.md) for sources, design decisions, and validation evidence.
+The smoke test runs the real Hermes CLI against a deterministic local model stub. It checks file writing, terminal execution, literal prompt handling, and authentication-failure exit codes without a paid model call. Unit tests cover HTTP validation, exact account/endpoint routing, Worker-selected gateway headers, and container cleanup. See [`docs/research.md`](docs/research.md) for sources, design decisions, and validation evidence.
 
 The Cloudflare docs draft is [`docs/hermes.mdx`](docs/hermes.mdx), intended for `/sandbox/coding-agents/hermes/`. Publication instructions are in [`docs/README.md`](docs/README.md).
