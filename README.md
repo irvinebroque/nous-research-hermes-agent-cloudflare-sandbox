@@ -2,7 +2,7 @@
 
 Run the [native Hermes web dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard) in a Cloudflare container. Sign in through Cloudflare Access, open **Chat**, and use the real Hermes terminal in your browser. Each signed-in identity gets its own container and workspace.
 
-Model calls go through **Cloudflare AI Gateway** using the Worker's AI binding. No model API key or Cloudflare API token enters the container. This example does not use OpenRouter.
+Model calls go through **Cloudflare AI Gateway** using the Worker's AI binding. No model API key or Cloudflare API token enters the container.
 
 ```mermaid
 flowchart LR
