@@ -9,17 +9,17 @@ Deployment date: 2026-10-13. Target: [Hermes dashboard](https://hermes-sandbox.r
 - Current version after removing the obsolete `API_TOKEN` secret: `d6c0a8f5-8b00-439f-a8df-2c7a590957b5`.
 - Container image digest: `sha256:12deefcc59d1044f72af5e72c1ff18fff1a207dfb05ade04ddef05ddeaac8111`.
 - AI Gateway: `hermes-sandbox`; model `openai/gpt-4.1-mini` through the AI binding.
-- Access: application `Hermes Sandbox Dashboard`, one-time PIN, Allow with three OR-based email-domain Include rules: `gmail.com`, `cloudflare.com`, and `snappr.co`. All verified addresses in those domains are eligible; the previous Everyone rule was removed.
+- Access: application `Hermes Sandbox Dashboard`, Google as its only identity provider, with automatic redirect enabled. The Allow policy has three OR-based email-domain Include rules: `gmail.com`, `cloudflare.com`, and `snappr.co`. Google-authenticated addresses in those domains are eligible; the previous Everyone rule was removed.
 - Managed OAuth: enabled; dynamic client registration allows localhost and loopback callbacks.
 - No Worker secrets remain. No inference API key or Cloudflare management token is supplied to the container.
 - Git history and working files passed Gitleaks; a separate comparison found no copies of the old token in tracked files or Git objects, including encoded values.
 
 Verified against the public deployment:
 
-- Browser requests redirect to Cloudflare Access sign-in.
+- Browser requests pass through Cloudflare Access and redirect directly to Google sign-in. Fresh isolated and existing browser contexts both reached Google's sign-in/account chooser without an OAuth configuration error. The existing account was signed out, so the callback has not yet been exercised.
 - Unauthenticated JSON/API requests receive HTTP 401.
 - `/.well-known/oauth-authorization-server` returns HTTP 200 and the configured authorization, token, registration and revocation endpoints, with S256 PKCE support.
-- Access API readback confirms a single Allow policy with exactly the three email domains, no additional Require or Exclude conditions, the one-time PIN provider, and managed OAuth still enabled. This verifies configuration, not an end-to-end login for each domain.
+- Access API readback confirms a single Allow policy with exactly the three email domains, no additional Require or Exclude conditions, Google as the only provider, automatic redirect enabled, and managed OAuth still enabled. This verifies configuration, not an end-to-end login for each domain. The existing account-level Google integration was reused without changing its credentials or other applications.
 
 Authenticated browser, WebSocket and live model checks for the new dashboard are still pending sign-in. The earlier CLI runner's successful inference tests below are not evidence that this new dashboard flow has passed those checks.
 
@@ -45,7 +45,7 @@ This earlier `/run` interface has been replaced by the dashboard.
 
 ## Repeat the dashboard verification
 
-1. Sign in at the deployed URL and open **Chat**.
+1. Sign in with Google at the deployed URL and open **Chat**.
 2. Ask Hermes to write a small Python module and unittest in `/workspace`, then run the test.
 3. Confirm the streamed answer, tool output and files in the dashboard; check successful calls in AI Gateway.
 4. Refresh and confirm the same session remains while its container is running.

@@ -37,9 +37,11 @@ hermes dashboard --host 0.0.0.0 --port 9119 --no-open --skip-build
 
 Choose your Worker name in `wrangler.jsonc`. Your dashboard URL will be `https://<worker-name>.<workers-subdomain>.workers.dev`.
 
-Create a [self-hosted Access application](/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for that complete hostname. Enable one-time PIN and create an **Allow** policy for your intended users. Add each allowed email domain as a separate **Include → Emails ending in** entry. Include entries use OR logic, so an address needs to match only one domain. An Allow policy still requires authentication.
+Create a [self-hosted Access application](/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for that complete hostname. Configure the [Google identity provider](/cloudflare-one/integrations/identity-providers/google/), select only Google for this application, and enable automatic redirect to the identity provider. If you need personal Gmail accounts and accounts from multiple organizations, configure an **External** Google OAuth audience.
 
-Enable [managed OAuth](/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) for the Access application. For CLI OAuth clients, enable dynamic client registration and localhost/loopback redirect support. Managed OAuth adds an OAuth authorization-code flow for non-browser clients; browser users continue through the Access login page.
+Create an **Allow** policy for your intended users. Add each allowed email domain as a separate **Include → Emails ending in** entry. Include entries use OR logic, so the Google-authenticated address needs to match only one domain.
+
+Enable [managed OAuth](/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) for the Access application. For CLI OAuth clients, enable dynamic client registration and localhost/loopback redirect support. Managed OAuth adds an OAuth authorization-code flow for non-browser clients; Google authenticates browser users through Access.
 
 Set these variables in `wrangler.jsonc`:
 
@@ -66,7 +68,7 @@ Every user admitted by your Access policy can use your model and container budge
 npm run deploy
 ```
 
-Open the Worker URL and sign in through Access. The first request starts your container, which can take a minute. Open **Chat** and enter:
+Open the Worker URL and sign in with Google through Access. The first request starts your container, which can take a minute. Open **Chat** and enter:
 
 ```text
 Create hello.py and a unittest for it in /workspace.
