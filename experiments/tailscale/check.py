@@ -1,8 +1,4 @@
-"""Run in a fresh deployed container. Read private test configuration from stdin.
-
-Requires TS_AUTHKEY, PGHOST, PGDATABASE, PGUSER and PGPASSWORD. Optional:
-PGPORT, PGSSLROOTCERT_PEM. Output contains test evidence, never credentials.
-"""
+"""Join a tailnet and query Postgres over verified TLS. Configuration arrives on stdin."""
 import json
 import os
 import pathlib
@@ -36,10 +32,9 @@ key_file.write_text(config['TS_AUTHKEY'])
 key_file.chmod(0o600)
 ts = ['tailscale', '--socket=' + socket_path]
 result = {'passed': False, 'stage': 'start_kernel_daemon', 'proxy_used': False}
-result['boot_id'] = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 daemon = None
 try:
-    with open('/tmp/tailscaled-acceptance.log', 'w') as log:
+    with open('/run/tailscale/daemon.log', 'w') as log:
         daemon = subprocess.Popen(['tailscaled', '--tun=tailscale0', '--state=mem:', '--socket=' + socket_path], stdout=log, stderr=log)
     deadline = time.monotonic() + 15
     while not pathlib.Path(socket_path).exists():
@@ -51,17 +46,15 @@ try:
     key_file.unlink()
     status = json.loads(run(ts + ['status', '--json']))
     result['backend_state'] = status['BackendState']
-    result['node_id'] = status['Self']['ID']
     if result['backend_state'] != 'Running':
         raise RuntimeError('Tailnet is not running')
-    result['tailscale0'] = json.loads(run(['ip', '-j', 'link', 'show', 'tailscale0']))
     result['stage'] = 'normal_resolver'
     # This is the application's normal libc resolver: no SOCKS resolver or hosts override.
     addresses = sorted({a[4][0] for a in socket.getaddrinfo(config['PGHOST'], int(config.get('PGPORT', '5432')), type=socket.SOCK_STREAM)})
     result['resolved_addresses'] = addresses
     result['stage'] = 'tailnet_routes'
-    result['routes'] = [json.loads(run(['ip', '-j', 'route', 'get', address])) for address in addresses]
-    if not addresses or any(route[0].get('dev') != 'tailscale0' for route in result['routes']):
+    routes = [json.loads(run(['ip', '-j', 'route', 'get', address])) for address in addresses]
+    if not addresses or any(route[0].get('dev') != 'tailscale0' for route in routes):
         raise RuntimeError('Database address does not route through tailscale0')
     result['stage'] = 'postgres_tls_query'
     env = {k: v for k, v in os.environ.items() if not k.upper().endswith('_PROXY') and not k.startswith('PG')}
@@ -88,10 +81,5 @@ finally:
             run(ts + ['logout'], timeout=10)
         except Exception:
             pass
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait()
+        # The Worker destroys the container, including the daemon, in its finally block.
 print(json.dumps(result))

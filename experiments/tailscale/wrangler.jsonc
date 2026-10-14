@@ -5,7 +5,6 @@
   "compatibility_date": "2026-10-13",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
-  "vars": { "SCHEDULING_POLICY": "durable_object" },
   "containers": [{
     "class_name": "NetworkProbe",
     "scheduling_policy": "durable_object",

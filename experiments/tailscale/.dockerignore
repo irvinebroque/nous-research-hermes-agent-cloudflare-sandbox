@@ -1,6 +1,3 @@
 **
 !Dockerfile
-!probe.py
-!server.py
-!acceptance.py
-!fixture.py
+!check.py
