@@ -37,7 +37,7 @@ hermes dashboard --host 0.0.0.0 --port 9119 --no-open --skip-build
 
 Choose your Worker name in `wrangler.jsonc`. Your dashboard URL will be `https://<worker-name>.<workers-subdomain>.workers.dev`.
 
-Create a [self-hosted Access application](/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for that complete hostname. Configure an identity provider and an **Allow** policy for your intended users. To let anyone with an email sign in, enable one-time PIN and use the **Everyone** selector. An Allow policy still requires authentication.
+Create a [self-hosted Access application](/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for that complete hostname. Enable one-time PIN and create an **Allow** policy for your intended users. Add each allowed email domain as a separate **Include → Emails ending in** entry. Include entries use OR logic, so an address needs to match only one domain. An Allow policy still requires authentication.
 
 Enable [managed OAuth](/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) for the Access application. For CLI OAuth clients, enable dynamic client registration and localhost/loopback redirect support. Managed OAuth adds an OAuth authorization-code flow for non-browser clients; browser users continue through the Access login page.
 
@@ -57,7 +57,7 @@ Set these variables in `wrangler.jsonc`:
 The audience tag is available in the Access application's settings. These values are identifiers, not API keys. The AI binding authenticates model calls, so you do not need an inference token in a Worker secret or in the container.
 
 :::note
-Allowing any email lets any signed-in visitor use your model and container budget. Configure AI Gateway rate limits for your deployment, or narrow the Access policy to your intended users.
+Every user admitted by your Access policy can use your model and container budget. Choose the allowed email domains for your intended audience and configure AI Gateway rate limits for your deployment.
 :::
 
 ## 3. Deploy and open the dashboard

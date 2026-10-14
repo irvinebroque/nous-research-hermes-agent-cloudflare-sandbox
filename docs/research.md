@@ -30,7 +30,7 @@ The browser terminal treats a prompt and Enter delivered in one frame as pasted 
 
 - No Hermes source patches, Docker-in-Docker, custom terminal backend or replacement frontend.
 - No inference credentials inside the agent. It can still consume the allowed model; network restrictions are not a spending quota.
-- Any-email Access is an explicit demo policy. It authenticates visitors but does not limit them to a private team.
+- The deployed Access policy allows verified `gmail.com`, `cloudflare.com`, and `snappr.co` addresses using OR-based email-domain Include rules. This replaced the initial Everyone policy at the deployment owner's request.
 - The dashboard can modify all of its own container's state. Native features requiring external services or additional package downloads remain blocked by the network policy.
 - For persistence, save the workspace **and** `HERMES_HOME`. Plan consistent SQLite snapshots and restores; do not put live SQLite files on an object-storage mount. See [workspace persistence](https://developers.cloudflare.com/sandbox/files/save-and-restore-a-workspace/).
 - The [coding-agents overview](https://developers.cloudflare.com/sandbox/coding-agents/) is navigation. The proposed Hermes page is a child at `/sandbox/coding-agents/hermes/`, with a card in the existing overview.

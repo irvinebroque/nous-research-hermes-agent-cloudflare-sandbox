@@ -9,7 +9,7 @@ Deployment date: 2026-10-13. Target: [Hermes dashboard](https://hermes-sandbox.r
 - Current version after removing the obsolete `API_TOKEN` secret: `d6c0a8f5-8b00-439f-a8df-2c7a590957b5`.
 - Container image digest: `sha256:12deefcc59d1044f72af5e72c1ff18fff1a207dfb05ade04ddef05ddeaac8111`.
 - AI Gateway: `hermes-sandbox`; model `openai/gpt-4.1-mini` through the AI binding.
-- Access: application `Hermes Sandbox Dashboard`, one-time PIN, Allow Everyone. Any verified email can sign in.
+- Access: application `Hermes Sandbox Dashboard`, one-time PIN, Allow with three OR-based email-domain Include rules: `gmail.com`, `cloudflare.com`, and `snappr.co`. All verified addresses in those domains are eligible; the previous Everyone rule was removed.
 - Managed OAuth: enabled; dynamic client registration allows localhost and loopback callbacks.
 - No Worker secrets remain. No inference API key or Cloudflare management token is supplied to the container.
 - Git history and working files passed Gitleaks; a separate comparison found no copies of the old token in tracked files or Git objects, including encoded values.
@@ -19,7 +19,7 @@ Verified against the public deployment:
 - Browser requests redirect to Cloudflare Access sign-in.
 - Unauthenticated JSON/API requests receive HTTP 401.
 - `/.well-known/oauth-authorization-server` returns HTTP 200 and the configured authorization, token, registration and revocation endpoints, with S256 PKCE support.
-- Access API readback confirms the intended policy and managed OAuth configuration.
+- Access API readback confirms a single Allow policy with exactly the three email domains, no additional Require or Exclude conditions, the one-time PIN provider, and managed OAuth still enabled. This verifies configuration, not an end-to-end login for each domain.
 
 Authenticated browser, WebSocket and live model checks for the new dashboard are still pending sign-in. The earlier CLI runner's successful inference tests below are not evidence that this new dashboard flow has passed those checks.
 

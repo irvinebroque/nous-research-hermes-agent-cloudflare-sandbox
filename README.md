@@ -32,7 +32,7 @@ npx wrangler login
 
 1. Create an [AI Gateway](https://developers.cloudflare.com/ai-gateway/get-started/) and enable [Unified Billing](https://developers.cloudflare.com/ai-gateway/features/unified-billing/) for `openai/gpt-4.1-mini`. Set `AI_GATEWAY_ID` in `wrangler.jsonc`. The AI binding handles authentication; do not paste your CLI OAuth token into the app.
 2. Choose the Worker name in `wrangler.jsonc`. Its URL is `https://<worker-name>.<workers-subdomain>.workers.dev`.
-3. Create a [self-hosted Access application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for that entire hostname. Enable the one-time PIN identity provider. Add an **Allow** policy with **Everyone** to admit any verified email. This still requires sign-in. Use a narrower policy if you want a private deployment.
+3. Create a [self-hosted Access application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for that entire hostname. Enable the one-time PIN identity provider. Add an **Allow** policy with three **Include → Emails ending in** entries: `gmail.com`, `cloudflare.com`, and `snappr.co`. Include entries are alternatives: a verified address from any one of these domains is allowed. Do not put the three domains under Require. Choose your own allowed domains when deploying a different audience.
 4. Enable [managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) on the application. Enable dynamic client registration and localhost/loopback redirects if you want CLI OAuth clients. Browser users still use the normal Access sign-in page; managed OAuth adds authorization-code/PKCE support for non-browser clients.
 5. Copy the application's audience tag into `ACCESS_AUD` and your `<team>.cloudflareaccess.com` domain into `ACCESS_TEAM_DOMAIN` in `wrangler.jsonc`. These are identifiers, not secrets.
 6. Deploy:
@@ -81,7 +81,7 @@ The raw response preserves streaming and tool calls. `OPENAI_API_KEY=provided-by
 
 The initial toolsets are `terminal` and `file`. Tools can control their entire container. Other Internet destinations, runtime package downloads, browser tools, external integrations, and alternate model providers are not enabled by this example. GitHub access is unauthenticated. This is a small dashboard demo, not a complete hosted version of every Hermes feature.
 
-Allowing any email permits any signed-in visitor to consume your model and container budget. Set AI Gateway rate limits appropriate to your demo. The network boundary keeps inference credentials outside the container; it is not a per-user spending quota.
+The deployed demo admits verified `gmail.com`, `cloudflare.com`, and `snappr.co` addresses. Any admitted visitor can consume your model and container budget. Set AI Gateway rate limits appropriate to your demo. The network boundary keeps inference credentials outside the container; it is not a per-user spending quota.
 
 ## Check it
 
