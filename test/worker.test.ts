@@ -127,6 +127,9 @@ describe("AI Gateway bridge", () => {
 function fixture() {
   const forwarded: Request[] = [];
   const fetch = vi.fn(async (input: Request | string) => {
+    if (new URL(typeof input === "string" ? input : input.url).protocol !== "http:") {
+      throw new Error("Connecting to a container using HTTPS is not currently supported.");
+    }
     if (String(input).endsWith("/api/status")) return new Response("ok");
     if (String(input).endsWith("/auth/password-login")) return new Response("ok", { headers: { "Set-Cookie": "hermes_session_at=internal-test-session; HttpOnly" } });
     forwarded.push(input as Request);
@@ -142,6 +145,29 @@ function fixture() {
   return { sandbox, container, forwarded, fetch, storage };
 }
 describe("dashboard lifecycle", () => {
+  it("forwards HTTPS requests over private HTTP while preserving POST data", async () => {
+    const { sandbox, forwarded } = fixture();
+    const request = new Request("https://demo.test/api/chat?session=abc", {
+      method: "POST", body: '{"message":"hello"}', headers: { "Content-Type": "application/json" },
+    });
+    expect((await sandbox.fetch(request)).status).toBe(200);
+    expect(request.url).toBe("https://demo.test/api/chat?session=abc");
+    expect(forwarded[0].url).toBe("http://demo.test/api/chat?session=abc");
+    expect(forwarded[0].method).toBe("POST");
+    expect(forwarded[0].headers.get("content-type")).toBe("application/json");
+    expect(await forwarded[0].text()).toBe('{"message":"hello"}');
+  });
+  it("preserves WebSocket upgrade headers over private HTTP", async () => {
+    const { sandbox, forwarded } = fixture();
+    const response = await sandbox.fetch(new Request("https://demo.test/api/pty?session=abc", {
+      headers: { Upgrade: "websocket", Connection: "Upgrade", Origin: "https://demo.test" },
+    }));
+    expect(response.status).toBe(200);
+    expect(forwarded[0].url).toBe("http://demo.test/api/pty?session=abc");
+    expect(forwarded[0].headers.get("upgrade")).toBe("websocket");
+    expect(forwarded[0].headers.get("connection")).toBe("Upgrade");
+    expect(forwarded[0].headers.get("origin")).toBe("https://demo.test");
+  });
   it("coalesces cold starts and strips external credentials before forwarding", async () => {
     const { sandbox, container, forwarded } = fixture();
     const request = new Request("https://demo.test/api/auth/me", { headers: { Cookie: "CF_Authorization=secret", Authorization: "Bearer secret", "Cf-Access-Jwt-Assertion": "secret", "Cf-Access-Client-Secret": "secret" } });

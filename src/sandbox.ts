@@ -22,7 +22,11 @@ export class HermesSandbox extends DurableObject<Env> {
         if (name.startsWith("cf-access-") || ["authorization", "cookie"].includes(name)) headers.delete(name);
       }
       headers.set("Cookie", this.cookie);
-      const response = await this.ctx.container!.getTcpPort(9119).fetch(new Request(request, { headers }));
+      // The private container port only supports HTTP; the public URL remains HTTPS.
+      const url = new URL(request.url);
+      url.protocol = "http:";
+      const internalRequest = new Request(url, request);
+      const response = await this.ctx.container!.getTcpPort(9119).fetch(new Request(internalRequest, { headers }));
       // Preserve WebSocket upgrades. Backend session cookies never leave the Worker.
       if (response.status === 101) return response;
       const result = new Response(response.body, response);
@@ -31,7 +35,7 @@ export class HermesSandbox extends DurableObject<Env> {
       return result;
     } catch (error) {
       console.error("Dashboard unavailable", error instanceof Error ? error.message : "Unknown error");
-      return new Response("Dashboard is starting. Please reload in a few seconds.", { status: 503, headers: { "Retry-After": "5" } });
+      return new Response("Dashboard is unavailable. Please try again shortly.", { status: 503, headers: { "Retry-After": "5" } });
     }
   }
 
