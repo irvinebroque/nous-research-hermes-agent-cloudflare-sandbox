@@ -50,7 +50,7 @@ export class HermesSandbox extends DurableObject<Env> {
     await container.interceptOutboundHttps("*", this.ctx.exports.Outbound);
     if (!container.running) {
       container.start({
-        image: container.images.hermes, instance: "standard-1", enableInternet: false,
+        image: container.images.hermes, instance: "standard-4", enableInternet: false,
         env: {
           HOME: "/root", HERMES_HOME: "/workspace/.hermes", TERMINAL_ENV: "local", TERMINAL_CWD: "/workspace",
           MODEL: this.env.MODEL, OPENAI_API_KEY: "provided-by-worker",
