@@ -109,3 +109,4 @@ For a live check, sign in, send the sample task through **Chat**, and verify the
 - [`docs/coding-agents-index.patch`](docs/coding-agents-index.patch): card for the existing coding-agents overview.
 - [`docs/research.md`](docs/research.md): upstream sources and design decisions.
 - [`docs/README.md`](docs/README.md): docs publication instructions.
+- [`experiments/tailscale/README.md`](experiments/tailscale/README.md): isolated, production-tested kernel Tailscale, split DNS, and TLS Postgres experiment under both Container scheduling policies.

@@ -15,22 +15,33 @@ export class NetworkProbe extends DurableObject<TestEnv> {
 
   private async start(inactivityMs: number) {
     const container = this.ctx.container!;
+    console.log("test: starting container");
     if (this.env.SCHEDULING_POLICY === "default") {
       container.start({ enableInternet: true });
     } else {
       container.start({ image: container.images.probe, instance: "lite", enableInternet: true });
     }
     await container.setInactivityTimeout(inactivityMs);
+    console.log("test: waiting for HTTP readiness");
     const deadline = Date.now() + 90_000;
-    while (true) {
-      try {
-        const response = await container.getTcpPort(9080).fetch("http://container/health", { signal: AbortSignal.timeout(3000) });
-        await response.body?.cancel();
-        if (response.ok) break;
-      } catch { /* Default scheduling may need time to allocate an instance. */ }
-      if (Date.now() > deadline) throw new Error("Probe container did not become ready");
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    let finished = false;
+    const ready = async () => {
+      while (!finished) {
+        try {
+          const response = await container.getTcpPort(9080).fetch("http://container/health", { signal: AbortSignal.timeout(3000) });
+          await response.body?.cancel();
+          if (response.ok) return;
+        } catch { /* Default scheduling may need time to allocate an instance. */ }
+        if (Date.now() > deadline) throw new Error("Probe container did not become ready");
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    };
+    try {
+      await Promise.race([ready(), container.monitor().then(() => { throw new Error("Container exited during startup"); })]);
+    } finally {
+      finished = true;
     }
+    console.log("test: HTTP ready");
   }
 
   private async run() {
@@ -61,6 +72,7 @@ export class NetworkProbe extends DurableObject<TestEnv> {
       // Always begin from a new container; Tailscale state is never restored.
       await container.destroy();
       await this.start(fixture ? 1_800_000 : 180_000);
+      console.log("test: executing", fixture ? "fixture" : "acceptance");
       const process = await container.exec(["python3", fixture ? "/opt/fixture.py" : "/opt/acceptance.py"], {
         stdin: new Response(config).body!, signal: AbortSignal.timeout(150_000),
       });
@@ -68,8 +80,13 @@ export class NetworkProbe extends DurableObject<TestEnv> {
       // Never forward stderr: it can contain credentials or database diagnostics.
       if (output.exitCode !== 0) throw new Error("Test process failed");
       const result = JSON.parse(new TextDecoder().decode(output.stdout));
+      console.log("test: completed", result.stage, result.passed);
       keepFixture = fixture && result.passed === true;
-      return { testedAt: new Date().toISOString(), schedulingPolicy: this.env.SCHEDULING_POLICY, ...result };
+      return { testedAt: new Date().toISOString(), schedulingPolicy: this.env.SCHEDULING_POLICY, image: container.images.probe, ...result };
+    } catch (error) {
+      // These errors originate in the Container API, not subprocess stderr or config.
+      console.log("test: container failure", error instanceof Error ? error.name + ": " + error.message : "unknown");
+      throw error;
     } finally {
       if (!keepFixture) await container.destroy();
     }
@@ -92,17 +109,21 @@ export default {
     if (!env.TEST_TOKEN || actual.length !== expected.length || !timingSafeEqual(actual, expected)) return new Response("Unauthorized", { status: 401 });
     const headers = { "Cache-Control": "no-store" };
     if (path === "/cleanup") {
-      await env.PROBE.getByName("postgres-fixture").cleanup();
+      await env.PROBE.getByName("postgres-fixture-v4").cleanup();
       return Response.json({ cleanedUp: true }, { headers });
     }
     const body = await request.text();
     if (body.length > 32_768) return new Response("Too large", { status: 413 });
+    try { JSON.parse(body); } catch { return new Response("Invalid JSON", { status: 400 }); }
     try {
-      JSON.parse(body);
       const fixture = path === "/fixture";
-      const result = await env.PROBE.getByName(fixture ? "postgres-fixture" : "postgres-acceptance").acceptance(body, fixture);
+      const result = await env.PROBE.getByName(fixture ? "postgres-fixture-v4" : "postgres-acceptance-v3").acceptance(body, fixture);
       return Response.json(result, { headers });
-    } catch {
+    } catch (error) {
+      console.log("test: RPC failure", error instanceof Error ? error.name + ": " + error.message : "unknown");
+      if (error instanceof Error && error.message.includes("There is no container instance")) {
+        return Response.json({ passed: false, stage: "capacity_pending" }, { status: 503, headers: { ...headers, "Retry-After": "5" } });
+      }
       return Response.json({ passed: false, stage: "container_execution" }, { status: 500, headers });
     }
   },

@@ -17,14 +17,28 @@ scheduling policies passed these checks on Cloudflare infrastructure:
 | `/etc/resolv.conf` writable | Pass | Pass |
 | Tailscale control-plane HTTPS reachable | Pass | Pass |
 | Kernel `tailscaled` creates `tailscale0` | Pass | Pass |
-| Authenticated tailnet, split DNS, TLS Postgres query | Pending | Pending |
-| Repeat after container replacement | Pending | Pending |
+| Authenticated tailnet, split DNS, TLS Postgres query | Pass (2 runs) | Pass (2 runs) |
+| Repeat after container replacement | Pass | Pass |
 
 The tested kernel was `6.18.54-cloudflare-microvm-2026.9.16`, with Tailscale
 `1.104.1`. See the sanitized machine-readable results in [evidence](./evidence/).
 These results establish runtime capability, not a platform guarantee or proof
 that an arbitrary private database is reachable. The unauthenticated daemon
-correctly reaches `NeedsLogin`.
+correctly reaches `NeedsLogin` in the credential-free probe. The authenticated
+acceptance runs reach `Running`, resolve `replica.cf-tailscale.test` through the
+normal system resolver, route to it over `tailscale0`, and return `1` with an
+active TLS session using `sslmode=verify-full`. Both policies have distinct boot
+IDs and hashed Tailscale node IDs across their two runs. The final four runs
+needed zero capacity retries. After verification, the fixture was stopped, its
+restricted DNS entry and temporary credential files were removed, the auth key
+was revoked, and both test Workers rejected the deleted operator token (401).
+
+The health server uses `socketserver.TCPServer` because the deployed
+`durable_object` runtime can give a container a 64-character hostname. Python's
+`HTTPServer` calls `getfqdn()` while binding and rejects that hostname as an
+overlong DNS label. This was reproduced in production and checked locally with
+a 64-character hostname. Postgres puts its Unix socket in its data directory,
+because `/var/run/postgresql` is not present in this deployed image.
 
 The fixture also passes an offline local smoke check: its DNS server resolves the
 test hostname, Postgres returns `1` over verified TLS, and the same client rejects
@@ -60,7 +74,8 @@ Keep a copy in a mode-0600 file **outside this repository**, for example
 `/tmp/tailscale-test/operator-token`. Keep all test configuration there too.
 Never put real keys in JSONC, command arguments, Docker build arguments, Git, or
 screenshots. The Worker passes configuration to the process through stdin;
-responses and logs omit raw command diagnostics and credentials.
+responses and logs omit credentials. Fixture startup failures include sanitized
+Postgres diagnostics; client failures report only their stage and error type.
 
 Create a short-lived, reusable, ephemeral Tailscale auth key for the test tailnet.
 For an existing private database, prepare a mode-0600 JSON file with these fields:
@@ -135,6 +150,16 @@ python3 experiments/tailscale/run-test.py \
 
 Delete temporary credential files and remove `TEST_TOKEN` from the two Workers
 when finished. Ephemeral machines disappear after disconnecting.
+
+When iterating on the image, use a new test Durable Object name after cleaning
+up the previous fixture. In this deployment, an existing object continued
+running its previous Worker version and image after a deployment; fresh object
+names made the new code and image observable. The default-scheduling test
+allows two instances. Immediate replacement can still return “no container
+instance” during allocation. The Worker maps that specific error to HTTP 503;
+the runner retries it every five seconds for up to two minutes and records the
+retry count. Failed DNS or SQL checks are never retried by the runner.
+The result includes the image reference when the native runtime exposes it.
 
 ## Why the egress configuration differs
 

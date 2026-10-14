@@ -1,6 +1,7 @@
 """Invoke fixed, authenticated test operations without putting secrets in argv."""
 import argparse
 import json
+import time
 from pathlib import Path
 import urllib.error
 import urllib.parse
@@ -29,12 +30,23 @@ for _ in range(args.repeat):
         'Content-Type': 'application/json',
         'User-Agent': 'hermes-tailscale-test/1.0',
     })
-    try:
-        with urllib.request.urlopen(request, timeout=240) as response:
-            result = json.load(response)
-    except urllib.error.HTTPError as error:
-        # Do not print request headers or server error pages.
-        raise SystemExit(f'Test endpoint returned HTTP {error.code}') from None
+    retries = 0
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=240) as response:
+                result = json.load(response)
+            break
+        except urllib.error.HTTPError as error:
+            # Default scheduling can need time to release/reallocate capacity.
+            # Retry only this explicit transient status, not failed SQL checks.
+            if error.code == 503 and args.operation == 'acceptance' and retries < 24:
+                retries += 1
+                error.close()
+                time.sleep(5)
+                continue
+            print(json.dumps(results, indent=2))
+            raise SystemExit(f'Test endpoint returned HTTP {error.code}') from None
+    result['capacity_retries'] = retries
     results.append(result)
     if result.get('passed') is False:
         print(json.dumps(results, indent=2))

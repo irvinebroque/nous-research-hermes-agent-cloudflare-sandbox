@@ -1,7 +1,6 @@
 """Disposable TLS Postgres and split-DNS fixture, listening only on the tailnet."""
 import ipaddress
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -51,7 +50,7 @@ try:
     run(['chown', 'postgres:postgres', str(data / 'server.key'), str(data / 'server.crt')])
     (data / 'pg_hba.conf').write_text('local all all trust\nhostssl postgres testuser 100.64.0.0/10 scram-sha-256\n')
     with (data / 'postgresql.conf').open('a') as f:
-        f.write(f"\nlisten_addresses = '{address}'\nssl = on\nssl_cert_file = 'server.crt'\nssl_key_file = 'server.key'\n")
+        f.write(f"\nlisten_addresses = '{address}'\nunix_socket_directories = '{data}'\nssl = on\nssl_cert_file = 'server.crt'\nssl_key_file = 'server.key'\n")
     run(pg + ['/usr/lib/postgresql/15/bin/pg_ctl', '-D', str(data), '-l', str(data / 'postgres.log'), '-w', 'start'])
     stage = 'dns_setup'
     with (root / 'dnsmasq.log').open('w') as log:
@@ -61,6 +60,13 @@ try:
         raise RuntimeError('DNS fixture did not start')
     print(json.dumps({'passed': True, 'stage': 'ready', 'address': address, 'split_dns_zone': 'cf-tailscale.test', 'PGHOST': 'replica.cf-tailscale.test', 'PGDATABASE': 'postgres', 'PGUSER': 'testuser', 'PGSSLROOTCERT_PEM': (root / 'ca.pem').read_text()}))
 except Exception as error:
-    print(json.dumps({'passed': False, 'stage': stage, 'error_type': type(error).__name__}))
+    result = {'passed': False, 'stage': stage, 'error_type': type(error).__name__}
+    if stage == 'postgres_setup' and isinstance(error, subprocess.CalledProcessError):
+        result['command'] = error.cmd[:4]
+        result['diagnostic'] = error.stderr.replace(config['PGPASSWORD'], '[redacted]').replace(config['TS_AUTHKEY'], '[redacted]')[:1200]
+        postgres_log = Path('/var/lib/postgresql/test/postgres.log')
+        if postgres_log.exists():
+            result['postgres_startup'] = postgres_log.read_text()[-2000:].replace(config['PGPASSWORD'], '[redacted]').replace(config['TS_AUTHKEY'], '[redacted]')
+    print(json.dumps(result))
 finally:
     key.unlink(missing_ok=True)

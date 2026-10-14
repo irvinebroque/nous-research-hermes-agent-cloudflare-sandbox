@@ -11,7 +11,7 @@
     "scheduling_policy": "default",
     "image": "./Dockerfile",
     "instance_type": "lite",
-    "max_instances": 1
+    "max_instances": 2
   }],
   "durable_objects": { "bindings": [{ "name": "PROBE", "class_name": "NetworkProbe" }] },
   "exports": { "NetworkProbe": { "type": "durable-object", "storage": "sqlite" } }
