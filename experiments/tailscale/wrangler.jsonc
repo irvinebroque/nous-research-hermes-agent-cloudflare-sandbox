@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "hermes-tailscale-probe",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": { "SCHEDULING_POLICY": "durable_object" },
+  "containers": [{
+    "class_name": "NetworkProbe",
+    "scheduling_policy": "durable_object",
+    "images": { "probe": { "dockerfile": "./Dockerfile", "build_context": "." } }
+  }],
+  "durable_objects": { "bindings": [{ "name": "PROBE", "class_name": "NetworkProbe" }] },
+  "exports": { "NetworkProbe": { "type": "durable-object", "storage": "sqlite" } }
+}

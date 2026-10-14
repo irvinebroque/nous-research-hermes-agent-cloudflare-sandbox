@@ -1,0 +1,55 @@
+{
+  "testedAt": "2026-10-14T00:11:38.926Z",
+  "schedulingPolicy": "durable_object",
+  "kernel": "6.18.54-cloudflare-microvm-2026.9.16",
+  "uid": 0,
+  "capabilities": [
+    "CapInh:\t00000000abac35fb",
+    "CapPrm:\t00000000abac35fb",
+    "CapEff:\t00000000abac35fb",
+    "CapBnd:\t00000000abac35fb",
+    "CapAmb:\t00000000abac35fb"
+  ],
+  "tailscale_version": {
+    "exit_code": 0,
+    "stdout": "1.104.1\n  tailscale commit: 9a522a9786c97eb7910c01ccb7bd66557b04c910\n  long version: 1.104.1-t9a522a978\n  go version: go1.27.1 (tailscale/go 24ee2fd061)\n",
+    "stderr": ""
+  },
+  "tun_existed": true,
+  "tun_ioctl": {
+    "success": true
+  },
+  "link_up": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "assign_address": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "add_route": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "netfilter": {
+    "exit_code": 0,
+    "stdout": "-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n",
+    "stderr": ""
+  },
+  "resolver_writable": true,
+  "control_plane_https": {
+    "exit_code": 0,
+    "stdout": "302",
+    "stderr": ""
+  },
+  "kernel_daemon_exit_code": null,
+  "tailscale0": {
+    "exit_code": 0,
+    "stdout": "[{\"ifindex\":6,\"ifname\":\"tailscale0\",\"flags\":[\"POINTOPOINT\",\"MULTICAST\",\"NOARP\",\"UP\",\"LOWER_UP\"],\"mtu\":1280,\"qdisc\":\"pfifo_fast\",\"operstate\":\"UNKNOWN\",\"linkmode\":\"DEFAULT\",\"group\":\"default\",\"txqlen\":500,\"link_type\":\"none\"}]\n",
+    "stderr": ""
+  },
+  "backend_state": "NeedsLogin"
+}
